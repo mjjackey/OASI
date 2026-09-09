@@ -30,8 +30,8 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
     scaler = GradScaler()
     model.train()
 
-    total_loss, all_preds, all_labels = 0, [], []
-    step = 0
+    epoch_loss, all_preds, all_labels = 0, [], []
+    batch_idx = 0
     ## Get labels from the dataloader
     for input_ids, attention_mask, labels, soft_p_tensor in tqdm(train_loader):
         input_ids, attention_mask, labels, soft_p_tensor = input_ids.to(args.device), attention_mask.to(args.device),\
@@ -46,11 +46,14 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
                 print(f">>> detect nan in total loss")
                 raise RuntimeError("loss is nan before backward")
 
-        loss = loss / accum_iter
-        scaler.scale(loss).backward()
+             # Gradient accumulation
+            loss_backward = loss / accum_iter
+            
+        batch_loss = loss.item()
+        scaler.scale(loss_backward).backward()
 
         ## Achieve the gradient accumalation
-        if (step+1) % accum_iter == 0:
+        if (batch_idx+1) % accum_iter == 0:
             # Rescale the gradients and clip gradients to avoid gradient explosion
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -62,24 +65,26 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
             # only step scheduler when weights updated
             scheduler.step() 
    
-        total_loss += loss.item()
+        epoch_loss += batch_loss
         all_preds.extend(torch.argmax(lbl_pred_logits, dim=-1).tolist())
         all_labels.extend(labels.tolist())
 
-        if step % 400 ==0:
-            print(f"step:{step}  cls_loss:{cls_loss.item():.4f}  contra_loss:{contra_loss.item():.4f} total_loss:{total_loss:.4f}")
+        if batch_idx % 400 ==0:
+            print(f"step:{batch_idx}  cls_loss:{cls_loss.item():.4f}  contra_loss:{contra_loss.item():.4f} batch_total_loss:{batch_loss:.4f}")
 
-        step+=1
+        batch_idx+=1
+    
+    train_avg_loss = epoch_loss / batch_idx  # total_loss / len(train_loader)
     
     train_acc = accuracy_score(all_labels, all_preds)
     train_weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
     macro_f1 = f1_score(all_labels, all_preds, average='macro')
-    print(f'Train => loss : {total_loss / len(train_loader):.04f}, '
+    print(f'Train => loss : {train_avg_loss:.04f}, '
           f'acc : {train_acc:.04f}, '
           f'f1 : {train_weighted_f1:.04f}, '
           f'macro_f1 : {macro_f1:.04f}')
 
-    return total_loss, train_acc, train_weighted_f1, macro_f1
+    return train_avg_loss, train_acc, train_weighted_f1, macro_f1
 
 
 def eval_or_test(model, loader, mode):
@@ -93,21 +98,22 @@ def eval_or_test(model, loader, mode):
                                                             labels.to(args.device), soft_p_tensor.to(args.device)
             logits, _, _, loss = model(input_ids, attention_mask, labels, soft_p_tensor)
 
-            total_loss += loss.item()
+            batch_loss = loss.item()
+            total_loss += batch_loss
             all_preds.extend(torch.argmax(logits, dim=-1).tolist())
             all_labels.extend(labels.tolist())
             all_logits.extend(logits.tolist())
 
-    total_loss = total_loss / len(loader)
+    eval_avg_loss = total_loss / len(loader)
     acc = accuracy_score(all_labels, all_preds)
     weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
     marco_f1 = f1_score(all_labels, all_preds, average='macro')
-    print(mode + f' => loss : {total_loss:.04f}, '
+    print(mode + f' => loss : {eval_avg_loss:.04f}, '
                  f'acc : {acc:.04f}, '
                  f'weighted_f1 : {weighted_f1:.04f}, '
                  f'marco_f1 : {marco_f1:.04f}')
 
-    return total_loss, acc, weighted_f1, marco_f1
+    return eval_avg_loss, acc, weighted_f1, marco_f1
 
 
 def softmax(x, axis=None):
@@ -184,15 +190,15 @@ def main():
         if eval_macro_f1 > best_val_macro:
             best_val_macro = eval_macro_f1
         wandb.log({
-            'epoch': epoch,
             'train_loss': train_loss,
             'train_acc': train_acc,
             'train_f1': train_f1,
             'train_macro_f1': train_macro_f1,
+            'eval_loss': eval_loss,
             'eval_acc': eval_acc,
             'eval_f1': eval_f1,
             'eval_macro_f1': eval_macro_f1
-        })
+        },step=epoch)
 
         early_stopping(val_loss=eval_loss, val_metric=eval_macro_f1, model=model)
         if early_stopping.early_stop:
@@ -206,6 +212,7 @@ def main():
     test_loss, test_acc, test_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test')
     print('test_acc: ', {test_acc}, 'test_f1: ', {test_f1}, 'test_marco_f1: ', {test_macro_f1})
     wandb.log({
+        'test_loss': test_loss,
         'test_acc': test_acc,
         'test_f1': test_f1,
         'test_marco_f1': test_macro_f1,
@@ -272,8 +279,3 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(args.seed)
 
     main()
-
-    # sweep_configuration = {
-    #     'method': 'bayes',
-    # }
-    # wandb.agent(sweep_id, function=main)
