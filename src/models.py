@@ -89,7 +89,7 @@ class CrossEncoder(nn.Module):
         #                                                self.alpha,
         #                                                self.gamma)
 
-    def forward(self, input_ids, attention_mask, labels, soft_p_tensor,current_epoch=0):
+    def forward(self, input_ids, attention_mask, labels, soft_p_tensor,lbl_set_list,current_epoch=0):
         """
         Args:
             input_ids: token_id, shape: [batch_size, seq_len] 
@@ -98,7 +98,7 @@ class CrossEncoder(nn.Module):
             soft_p_tensor: soft probability tensor, shape: [batch_size, num_classes]
         Parameters get from model(input_ids, attention_mask, labels) in train() which gets form dataloader
         """
-        # Get last_hidden_state, shape: [batch_size, seq_len, hidden_size] --> CLS token representation[batch_size, hidden_size]-->[batch_size,out_dim]
+        # Get projection head, last_hidden_state, shape: [batch_size, seq_len, hidden_size] --> CLS token representation[batch_size, hidden_size]-->[batch_size,out_dim]
         features = self.head(self.encoder(input_ids=input_ids, attention_mask=attention_mask)[0][:, 0, :])
         # output shape: [num_labels, hidden_size]
         label_emb = self.encoder(input_ids=self.label_input_ids, attention_mask=self.label_attn_masks)[0][:, 0, :]
@@ -123,7 +123,7 @@ class CrossEncoder(nn.Module):
         if current_epoch < self.warmup_epochs:
             contra_loss = torch.tensor(0.0, device= self.args.device)
         else:
-            contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, self.temperature)
+            contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature)
 
         # if __debug__:
         #     print(f"cls_loss: {cls_loss.item()}, contrastive loss: {contra_loss.item()}")
@@ -136,6 +136,7 @@ class CrossEncoder(nn.Module):
         features_norm: torch.Tensor,
         soft_p: torch.Tensor,
         labels: torch.Tensor,
+        lbl_set_list: list,
         tau: float = 0.07,
         eps: float = 1e-8
     ) -> torch.Tensor:
@@ -145,8 +146,9 @@ class CrossEncoder(nn.Module):
         Positive pair weight w_ij = cos(soft_p[i], soft_p[j]) from annotator distribution.
 
         Args:
-            features_norm: torch.Tensor, shape [B, D], L2‑normalized text representation
+            features_norm: torch.Tensor, shape [B, D], L2‑normalized projection head
             soft_p: torch.Tensor, shape [B, num_classes], annotator distribution
+            lbl_set_list: list of label set S_i for each sample in batch
             labels: torch.Tensor, shape [B], ground‑truth label index (long)
             eps: avoid division by zero
 
@@ -157,29 +159,37 @@ class CrossEncoder(nn.Module):
         assert labels.dim() == 1, f"labels expected shape [B], got {labels.shape}"
         B = features_norm.size(0)
         assert labels.size(0) == B, "batch size mismatch"
-        device = features_norm.device
 
         # 1. compute similarity between text embeddings: z_i · z_j  (since normalized)
         sim_z = torch.matmul(features_norm, features_norm.T)  # [B, B]
 
         # 2. weight matrix w_ij: cosine similarity of annotator distribution p_i, p_j
-        w_mat = F.cosine_similarity(
+        w_annotator = F.cosine_similarity(
             soft_p.unsqueeze(1),   # [B,1,27]
             soft_p.unsqueeze(0),   # [1,B,27]
             dim=-1
         )  # [B,B]
 
+        # Precompute Jaccard overlap o_ij [B,B]
+        o_mat = torch.zeros((B,B), dtype=torch.float32, device=z.device)
+        for i in range(B):
+            for j in range(B):
+                si = lbl_set_list[i]
+                sj = lbl_set_list[j]
+                inter = len(si & sj)
+                union = len(si | sj)
+                o_mat[i,j] = inter / union if union > 0 else 0.0
+
         # 3. overlap‑aware mask: positive candidate mask (same label)
         pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B]
         # exclude self‑pair i == i
-        self_mask = 1.0 - torch.eye(B, device=device)
+        self_mask = 1.0 - torch.eye(B, device = features_norm.device)
         pos_candidate_mask = pos_candidate_mask * self_mask
 
-        # 4. exp(sim / tau)
         exp_sim = torch.exp(sim_z / tau)
 
         # numerator: sum over valid positive pairs: w_ij * exp(sim_ij/tau)
-        numerator = torch.sum(exp_sim * w_mat * pos_candidate_mask, dim=-1)  # [B]
+        numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask, dim=-1)  # [B]
 
         # denominator: sum over all j≠i (all candidates, positive + negative)
         denominator = torch.sum(exp_sim * self_mask, dim=-1)  # [B]
