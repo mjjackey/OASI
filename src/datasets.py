@@ -71,8 +71,8 @@ def build_annotator_distri(ds_type:str):
     Returns:
         dictionary mapping example IDs to their soft targets
     """
-    # load raw full dataset, go_emotios_1.csv, go_emotions_2.csv, go_emotions_3.csv
     if ds_type == "goemotions":
+        # load raw full dataset, go_emotios_1.csv, go_emotions_2.csv, go_emotions_3.csv and concat them
         df_raw = pd.concat([pd.read_csv(p) for p in EMO_RAW_CSV_PATHS], ignore_index=True)
      
         missing = [c for c in EMOTION_COLS if c not in df_raw.columns]
@@ -85,11 +85,15 @@ def build_annotator_distri(ds_type:str):
             num_raters = len(valid)
             if num_raters == 0:
                 continue
-            counts = valid[EMOTION_COLS].sum(axis=0).values  # ndarray
+            # One dim series with 28 bool values, true means voted column label 
+            df_col_bool = (valid[EMOTION_COLS] != 0).any(axis=0)
+            raw_multi_lbl_indice = [idx for idx, flag in enumerate(df_col_bool) if flag]
+            # 28 dims vector,  ndarray
+            counts = valid[EMOTION_COLS].sum(axis=0).values  
             # print("counts: ", type(counts).__name__)
-            # annotator-distribution, [0,1]^28
+            # 28 dims annotator-distribution vector, [0~1]^28
             prob_vec = counts / num_raters
-            soft_target_dict[cid] = prob_vec
+            soft_target_dict[cid] = (prob_vec, raw_multi_lbl_indice)
     return soft_target_dict
 
 
@@ -119,6 +123,7 @@ def merge_and_save(split_df, soft_target_dict, out_path):
     if len(missing) > 0:
         print(f"[WARN] {len(missing)} samplies cannot be found in the raw csv, will be ignored: {out_path}")
 
+    # Filter out the df whose id is the soft_target_dict's key
     df = split_df[split_df["id"].isin(soft_target_dict)].copy()
 
     # Store soft target as 28 columns
@@ -135,12 +140,19 @@ def merge_and_save(split_df, soft_target_dict, out_path):
         print(f"[OK] saved {len(handled_df)} rows -> {out_path}")
     # Store soft target as 1 column comma split string: sof_prob_str
     else: 
-        soft_anno_list = []
+        soft_anno_list = [] # contain all row's soft_prob_str
+        mult_lbl_list = []
         for cid in df["id"]:
-            vec = soft_target_dict[cid]  # shape (28,) np array
-            s = ",".join([f"{x:.6f}" for x in vec])
-            soft_anno_list.append(s)
+            vec, lbl_indice = soft_target_dict[cid]  # shape (28,) np array
+            # ndarray -> comma split string
+            vec_str = ",".join([f"{x:.6f}" for x in vec])
+            soft_anno_list.append(vec_str)
+            # list -> comma split string
+            mult_lbl_str = ",".join([str(x) for x in sorted(lbl_indice)])
+            mult_lbl_list.append(mult_lbl_str)
+
         df["soft_prob_str"] = soft_anno_list
+        df["raw_label_ids"] = mult_lbl_list
         # quoting=csv.QUOTE_MINIMAL to keep the comma split string in one column
         df.to_csv(out_path, index=False, encoding="utf-8",quoting=csv.QUOTE_MINIMAL)
         handled_df = df
@@ -149,7 +161,7 @@ def merge_and_save(split_df, soft_target_dict, out_path):
     return handled_df
 
 
-def filter_single_label_no_neutral(input_csv, output_csv):
+def filter_single_lbl_no_neutral(input_csv, output_csv):
     """
     Handle soft.csv
     Args:
@@ -184,6 +196,7 @@ def filter_single_label_no_neutral(input_csv, output_csv):
             "text": row["text"],
             "label": label_id,         
             "id": row["id"],
+            "raw_label_ids":  row["raw_label_ids"],
             "soft_prob_str": soft_p_str_27
         })
 
@@ -197,7 +210,7 @@ def handle_filter():
     for split in ["train", "valid", "test"]:
         in_path = f"../data/goemotions/goemotions_{split}_with_soft.csv"
         out_path = f"../data/goemotions/goemotions_{split}_single_27.csv"
-        filter_single_label_no_neutral(in_path, out_path)
+        filter_single_lbl_no_neutral(in_path, out_path)
  
 
 def handle_dataset(type):
@@ -254,36 +267,42 @@ class emotion_DataSet(Dataset):
         else:
             # single label
             label=row["label"]
+        
+        lbl_ids_str = row["raw_label_ids"]
+        lbl_ids = [int(x.strip()) for x in lbl_ids_str.split(",")]
+        row_lbl_set = set(lbl_ids)
 
         # deserialize annotator‑distribution soft vector
         soft_p_str = row["soft_prob_str"]
         soft_p_np = np.fromstring(soft_p_str, sep=",", dtype=np.float32) # shape (num_classes,)
         soft_p_tensor = torch.from_numpy(soft_p_np)
 
-        return (text,label,soft_p_tensor)
+        return (text,label,soft_p_tensor,row_lbl_set)
 
     def collate(self, batch):
         """
         Args:
-            batch: list of tuples (text, label, soft_p_tensor)
+            batch: list of tuples (text, label, soft_p_tensor, s_i)
         Returns: 
             input_ids: token id, shape: [batch_size, seq_len], 
             attention_mask: 1 or 0, shape: [batch_size, seq_len],
-            label_tensor: shape: [B] for single label, CrossEntropyLoss ; [B, uncertain_dim] for multi_label, BCEWithLogitsLoss
+            label_tensor: shape: [B] for single label, CrossEntropyLoss; [B, uncertain_dim] for multi_label, BCEWithLogitsLoss
             soft_p_tensor: [B, num_classes] annotator‑distribution
         """
-        texts = [t for t,_, _ in batch]
+        texts = [t for t,_, _, _ in batch]
         encode = self.tkr(texts, padding='longest', truncation=True, max_length=200, return_tensors='pt')
  
-        labels = [l for _, l,_ in batch]
+        labels = [l for _, l, _, _ in batch]
         label_tensor = torch.tensor(labels, dtype=torch.long)
 
         # a list of tensors, which one tensor is a tensor of shape [num_classes]
-        soft_p_tensors = [s for _, _, s in batch]  
+        soft_p_tensors = [s for _, _, s,_ in batch]  
         # Deserialise soft_p_tensors -> tensor [B,num_classes]
         soft_p_tensor = torch.stack(soft_p_tensors,dim=0)  # shape: [B, num_classes]
 
-        return encode['input_ids'], encode['attention_mask'], label_tensor, soft_p_tensor
+        row_lbl_set_list = [ls for _, _, _, ls in batch]
+
+        return encode['input_ids'], encode['attention_mask'], label_tensor, soft_p_tensor, row_lbl_set_list
 
 if __name__=="__main__":
     # handle_dataset('goemotions')
