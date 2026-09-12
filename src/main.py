@@ -34,7 +34,7 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
     batch_idx = 0
     ## Get labels from the dataloader
     for input_ids, attention_mask, labels, soft_p_tensor, lbl_set_list in tqdm(train_loader):
-        input_ids, attention_mask, labels, soft_p_tensor,  lbl_set_list = input_ids.to(args.device), attention_mask.to(args.device),\
+        input_ids, attention_mask, labels, soft_p_tensor = input_ids.to(args.device), attention_mask.to(args.device),\
                                                             labels.to(args.device), soft_p_tensor.to(args.device), 
 
         ## Invoke forward() function,   enabled=False
@@ -107,13 +107,13 @@ def eval_or_test(model, loader, mode):
     eval_avg_loss = total_loss / len(loader)
     acc = accuracy_score(all_labels, all_preds)
     weighted_f1 = f1_score(all_labels, all_preds, average='weighted')
-    marco_f1 = f1_score(all_labels, all_preds, average='macro')
+    macro_f1 = f1_score(all_labels, all_preds, average='macro')
     print(mode + f' => loss : {eval_avg_loss:.04f}, '
                  f'acc : {acc:.04f}, '
                  f'weighted_f1 : {weighted_f1:.04f}, '
-                 f'marco_f1 : {marco_f1:.04f}')
+                 f'macro_f1 : {macro_f1:.04f}')
 
-    return eval_avg_loss, acc, weighted_f1, marco_f1
+    return eval_avg_loss, acc, weighted_f1, macro_f1
 
 
 def softmax(x, axis=None):
@@ -217,7 +217,7 @@ def main():
         'test_loss': test_loss,
         'test_acc': test_acc,
         'test_f1': test_f1,
-        'test_marco_f1': test_macro_f1,
+        'test_macro_f1': test_macro_f1,
     })
 
     wandb.summary["test_acc"] = test_acc
@@ -234,7 +234,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='goemotions')
     parser.add_argument('--batch_size', type=int, default=4)  # original: 64
-    parser.add_argument('--accum_iter', type=int, default=16)
+    parser.add_argument('--accum_iter', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--encoder_type', type=str, default='roberta-base')
     parser.add_argument('--seed', type=int, default=0)
