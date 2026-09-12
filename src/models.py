@@ -138,6 +138,8 @@ class CrossEncoder(nn.Module):
         labels: torch.Tensor,
         lbl_set_list: list,
         tau: float = 0.07,
+        tau_o: float = 0.3,
+        alpha: float = 5.0,
         eps: float = 1e-8
     ) -> torch.Tensor:
         """
@@ -150,6 +152,8 @@ class CrossEncoder(nn.Module):
             soft_p: torch.Tensor, shape [B, num_classes], annotator distribution
             lbl_set_list: list of label set S_i for each sample in batch
             labels: torch.Tensor, shape [B], ground‑truth label index (long)
+            tau_o: jaccard overlap threshold
+            alpha: decay factor for overlap penalty
             eps: avoid division by zero
 
         Returns:
@@ -171,28 +175,43 @@ class CrossEncoder(nn.Module):
         )  # [B,B]
 
         # Precompute Jaccard overlap o_ij [B,B]
-        o_mat = torch.zeros((B,B), dtype=torch.float32, device=z.device)
+        jac_ov_sim = torch.zeros((B,B), dtype=torch.float32, device=features_norm.device)
         for i in range(B):
             for j in range(B):
                 si = lbl_set_list[i]
                 sj = lbl_set_list[j]
                 inter = len(si & sj)
                 union = len(si | sj)
-                o_mat[i,j] = inter / union if union > 0 else 0.0
+                jac_ov_sim[i,j] = inter / union if union > 0 else 0.0
+           
+        # Overlap-aware soft weight w_ov
+        w_ov = torch.where(
+            jac_ov_sim <= tau_o,
+            torch.ones_like(jac_ov_sim),
+            torch.exp(-alpha * jac_ov_sim)
+        )
+
+        # Total weight: annotator similarity * overlap penalty
+        # w_total = w_annotator * w_ov
 
         # 3. overlap‑aware mask: positive candidate mask (same label)
         pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B]
         # exclude self‑pair i == i
         self_mask = 1.0 - torch.eye(B, device = features_norm.device)
+        # for i in range(B):
+        #     for j in range(B):
+        #         # The raw label set of sample i is totaly equal to the label set of sample j
+        #         if i != j and lbl_set_list[i].issubset(lbl_set_list[j]) and lbl_set_list[j].issubset(lbl_set_list[i]):
+        #             pos_candidate_mask[i,j] = True
         pos_candidate_mask = pos_candidate_mask * self_mask
 
         exp_sim = torch.exp(sim_z / tau)
 
-        # numerator: sum over valid positive pairs: w_ij * exp(sim_ij/tau)
-        numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask, dim=-1)  # [B]
+        # numerator: sum over valid positive pairs: w_total * exp(sim_ij/tau)
+        numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask.float(), dim=-1)  # [B]
 
         # denominator: sum over all j≠i (all candidates, positive + negative)
-        denominator = torch.sum(exp_sim * self_mask, dim=-1)  # [B]
+        denominator = torch.sum(exp_sim * w_ov * self_mask.float(), dim=-1)  # [B]
 
         # InfoNCE per‑sample loss
         per_sample_loss = -torch.log((numerator + eps) / (denominator + eps))
@@ -254,7 +273,7 @@ class CrossEncoder(nn.Module):
         kmeans.fit_predict(features)
         cluster_labels = kmeans.labels_
         
-        ## Initialize mask(positive sign) and logits_mask(take part in contrastive loss caclutation sign) 
+        ## Initialize mask(positive sign) and logits_mask(take part in contrastive loss caclutation--sign) 
         mask, logits_mask = torch.zeros(batch_size, batch_size, device=self.device), torch.zeros(batch_size, batch_size, device=self.device)
         for i in range(batch_size):
             for j in range(i + 1, batch_size):
@@ -272,9 +291,11 @@ class CrossEncoder(nn.Module):
         ## loss_valid_mask is for conditions where there is no negative sample for a given sample, which would result in loss=0.
         loss_valid_mask = torch.ones(B, dtype=torch.bool, device=logits_mask.device)
         # Get the sample's indice array which the whole row logits_mask is zero
+        # shape: B*B --> B*1 --> N*1(N<B) bool -->N bool
         zero_mask_idx = torch.nonzero(logits_mask.sum(1) == 0).squeeze(1)
         for idx in zero_mask_idx:
             # Gather all negative sample indices (for different labels)
+            # shape: B --> N(N<B)   bool
             neg_sample_idices = torch.nonzero(~(labels == labels[idx])).squeeze(1)
             if  neg_sample_idices.shape[0] == 0:
             # No negative samples, set False, this sample will not take part in loss calculation  
