@@ -85,14 +85,14 @@ class SupClusterConLoss(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, features, labels, lbl_emb, num_labels, mask, logits_mask, lbl_logits, loss_valid_mask):
+    def forward(self, features, labels, lbl_emb, num_labels, positive_mask, logits_mask, lbl_logits, loss_valid_mask):
         """
         Args:
             features:  batch sample features [B, out_dim]
             labels:    batch ground‑truth labels [B]
             lbl_emb:   learnable label embedding matrix [num_labels, out_dim]
             num_labels: total number of classes
-            mask:       positive pair mask [B, B], mask[i,j]=1 means j is positive for i
+            positive_mask:  positive pair mask [B, B], mask[i,j]=1 means j is positive for i
             logits_mask: contrastive denominator mask [B, B]
             loss_valid_mask: [B] bool, True: sample can compute loss; False: skip sample (denominator empty)
         Returns:
@@ -104,7 +104,7 @@ class SupClusterConLoss(nn.Module):
         features = features.float()
         lbl_emb = lbl_emb.float()
         lbl_logits = lbl_logits.float()
-        mask = mask.float()
+        positive_mask = positive_mask.float()
         logits_mask = logits_mask.float()
         loss_valid_mask = loss_valid_mask.bool()
 
@@ -150,8 +150,8 @@ class SupClusterConLoss(nn.Module):
         # )
         exp_logits = torch.exp(feature_logits) * logits_mask  #[B, B]
         log_prob = feature_logits - torch.log(exp_logits.sum(1, keepdim=True)) #[B, B]
-        pos_sum = (mask * log_prob).sum(1) # [B]
-        mask_row_sum = mask.sum(1)         # [B]
+        pos_sum = (positive_mask * log_prob).sum(1) # [B]
+        mask_row_sum = positive_mask.sum(1)         # [B]
         ## mark which rows contain positive samples, avoid division by zero
         valid_row = mask_row_sum > 0
         mean_log_prob_pos = torch.zeros_like(pos_sum)

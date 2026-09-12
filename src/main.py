@@ -33,14 +33,14 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
     epoch_loss, all_preds, all_labels = 0, [], []
     batch_idx = 0
     ## Get labels from the dataloader
-    for input_ids, attention_mask, labels, soft_p_tensor in tqdm(train_loader):
-        input_ids, attention_mask, labels, soft_p_tensor, s_i = input_ids.to(args.device), attention_mask.to(args.device),\
-                                                            labels.to(args.device), soft_p_tensor.to(args.device), s_i.to(args.device)
+    for input_ids, attention_mask, labels, soft_p_tensor, lbl_set_list in tqdm(train_loader):
+        input_ids, attention_mask, labels, soft_p_tensor,  lbl_set_list = input_ids.to(args.device), attention_mask.to(args.device),\
+                                                            labels.to(args.device), soft_p_tensor.to(args.device), 
 
         ## Invoke forward() function,   enabled=False
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16): 
             # logits' shape: [batch_size, num_class]
-            lbl_pred_logits, cls_loss, contra_loss, loss = model(input_ids, attention_mask, labels, soft_p_tensor, s_i, current_epoch)
+            lbl_pred_logits, cls_loss, contra_loss, loss = model(input_ids, attention_mask, labels, soft_p_tensor,  lbl_set_list, current_epoch)
         
             if torch.isnan(loss).any():
                 print(f">>> detect nan in total loss")
@@ -93,9 +93,9 @@ def eval_or_test(model, loader, mode):
     all_logits = []
     total_loss,all_preds, all_labels = 0, [], []
     with torch.no_grad():
-        for input_ids, attention_mask, labels, soft_p_tensor in loader:
-            input_ids, attention_mask, labels, soft_p_tensor, lbl_set_list = input_ids.to(args.device), attention_mask.to(args.device), \
-                                                            labels.to(args.device), soft_p_tensor.to(args.device), lbl_set_list.to(args.device)
+        for input_ids, attention_mask, labels, soft_p_tensor, lbl_set_list in loader:
+            input_ids, attention_mask, labels, soft_p_tensor = input_ids.to(args.device), attention_mask.to(args.device), \
+                                                            labels.to(args.device), soft_p_tensor.to(args.device)
             logits, _, _, loss = model(input_ids, attention_mask, labels, soft_p_tensor,lbl_set_list)
 
             batch_loss = loss.item()
