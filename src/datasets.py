@@ -85,7 +85,7 @@ def build_annotator_distri(ds_type:str):
             num_raters = len(valid)
             if num_raters == 0:
                 continue
-            # One dim series with 28 bool values, true means voted column label 
+            ## One dim series with 28 bool values, true means voted column label 
             df_col_bool = (valid[EMOTION_COLS] != 0).any(axis=0)
             raw_multi_lbl_indice = [idx for idx, flag in enumerate(df_col_bool) if flag]
             # 28 dims vector,  ndarray
@@ -288,6 +288,7 @@ class emotion_DataSet(Dataset):
             attention_mask: 1 or 0, shape: [batch_size, seq_len],
             label_tensor: shape: [B] for single label, CrossEntropyLoss; [B, uncertain_dim] for multi_label, BCEWithLogitsLoss
             soft_p_tensor: [B, num_classes] annotator‑distribution
+            row_lbl_set_list: a list with size B, containing row multi-label set
         """
         texts = [t for t,_, _, _ in batch]
         encode = self.tkr(texts, padding='longest', truncation=True, max_length=200, return_tensors='pt')
@@ -295,7 +296,7 @@ class emotion_DataSet(Dataset):
         labels = [l for _, l, _, _ in batch]
         label_tensor = torch.tensor(labels, dtype=torch.long)
 
-        # a list of tensors, which one tensor is a tensor of shape [num_classes]
+        # a list of tensors, where one tensor's shape is [num_classes]
         soft_p_tensors = [s for _, _, s,_ in batch]  
         # Deserialise soft_p_tensors -> tensor [B,num_classes]
         soft_p_tensor = torch.stack(soft_p_tensors,dim=0)  # shape: [B, num_classes]

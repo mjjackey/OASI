@@ -138,6 +138,8 @@ class CrossEncoder(nn.Module):
         labels: torch.Tensor,
         lbl_set_list: list,
         tau: float = 0.07,
+        tau_o: float = 0.3,
+        alpha: float = 5.0,
         eps: float = 1e-8
     ) -> torch.Tensor:
         """
@@ -169,16 +171,6 @@ class CrossEncoder(nn.Module):
             soft_p.unsqueeze(0),   # [1,B,27]
             dim=-1
         )  # [B,B]
-
-        # Precompute Jaccard overlap o_ij [B,B]
-        o_mat = torch.zeros((B,B), dtype=torch.float32, device=z.device)
-        for i in range(B):
-            for j in range(B):
-                si = lbl_set_list[i]
-                sj = lbl_set_list[j]
-                inter = len(si & sj)
-                union = len(si | sj)
-                o_mat[i,j] = inter / union if union > 0 else 0.0
 
         # 3. overlap‑aware mask: positive candidate mask (same label)
         pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B]
