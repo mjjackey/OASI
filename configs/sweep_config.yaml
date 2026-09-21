@@ -5,12 +5,16 @@ project: goemotion_softinfonce
 
 parameters:
   seed:
-    values: [42] 
+    values: [123] 
     # values: [42, 123, 777, 999, 2025]
   lambda_contrast:
     values: [0.1]  #[0.02, 0.05, 0.08, 0.10, 0.15]
   temperature:
     values: [0.07]  #[0.07, 0.10, 0.15]
+  tau_ov:
+    values: [0.3]
+  alpha_ov:
+    values: [5.0]
   patience:
     value: 4
   warmup_epoch:
