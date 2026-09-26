@@ -220,5 +220,7 @@ class CrossEncoder(nn.Module):
         # InfoNCE per‑sample loss
         per_sample_loss = -torch.log((numerator + eps) / (denominator + eps))
         loss = torch.mean(per_sample_loss)
+        # sum_loss = torch.sum(per_sample_loss)
+        # print(f"loss: {loss.item()}, sum_loss: {sum_loss.item()}")  # debug
 
         return loss
