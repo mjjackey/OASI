@@ -14,7 +14,6 @@ from torch.nn import functional as F
 from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
 # import wandb
 import datetime
-from utils import SupClusterConLoss
 from description import ED_description, GE_description
 
 DEBUG_K_M = False
@@ -26,7 +25,6 @@ class CrossEncoder(nn.Module):
         self.encoder_type = args.encoder_type
         self.device = args.device
         self.alpha = args.alpha
-        self.gamma = args.gamma
         self.seed = args.seed
         self.temperature = args.temperature
         self.lambda_contrast = args.lambda_contrast
@@ -89,7 +87,7 @@ class CrossEncoder(nn.Module):
         #                                                self.alpha,
         #                                                self.gamma)
 
-    def forward(self, input_ids, attention_mask, labels, soft_p_tensor,lbl_set_list,current_epoch=0):
+    def forward(self, input_ids=None, attention_mask=None, labels=None, soft_p_tensor=None,lbl_set_list=None,current_epoch=0):
         """
         Args:
             input_ids: token_id, shape: [batch_size, seq_len] 
@@ -173,7 +171,7 @@ class CrossEncoder(nn.Module):
         )  # [B,B]
 
         # 3. overlap‑aware mask: positive candidate mask (same label)
-        pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B]
+        pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B] 
         # exclude self‑pair i == i
         self_mask = 1.0 - torch.eye(B, device = features_norm.device)
         pos_candidate_mask = pos_candidate_mask * self_mask
@@ -191,102 +189,3 @@ class CrossEncoder(nn.Module):
         loss = torch.mean(per_sample_loss)
 
         return loss
-
-
-    def get_features(self, input_ids, attention_mask):
-        features = self.encoder(input_ids=input_ids,
-                             attention_mask=attention_mask)[0][:, 0, :]
-        # feats_norm = F.normalize(self.head(feats), dim=1)
-        features_norm = self.head(features)
-
-        return features_norm
-
-    def sup_kmeans(self, features, labels):
-        """
-        Args: 
-            features: [batch_size, out_dim]
-            labels: label index, shape: [batch_size] 
-        """
-        cls_num, batch_size = len(np.unique(labels)), features.shape[0]
-        
-        ############################ Search the optimal cluster number opt_M  ##########################
-        if DEBUG_K_M:
-            min_J, opt_M = 1e6, 0
-
-            for M in tqdm(range(cls_num, cls_num + 10)):
-                kmeans = KMeans(n_clusters=M, init='k-means++', random_state=0)
-                kmeans.fit_predict(features)
-            
-                purity, purity_err_rate = 0,0
-                # shape: [opt_M, label_num]
-                P = np.zeros(opt_M, len(labels))
-                for cluster_id in range(M):
-                    ## Get the indices of all samples in the current cluster_id cluster
-                    indices = np.where(kmeans.labels_ == cluster_id)[0]
-                    ## Extract the true labels of all samples within the current cluster and their counts
-                    unique_labels, counts = np.unique(labels[indices], return_counts=True)
-                    ## The total number of "primary class" samples within all clusters 
-                    ## (clustering purity metric; the larger the value, the more closely the clustering results match the true labels)
-                    purity += np.max(counts)   
-                    ## Get P[i,j] = P({true label}=j | sample belongs to cluster i))
-                    P = P / np.sum(P, axis=1, keepdims=True)
-                    # shape: [opt_M]
-                    purity_per_cluster = np.max(P, axis=1)
-
-                ## Convert to purity error rate
-                purity_err_rate = (batch_size - purity) / batch_size
-                J = purity_err_rate + np.sqrt((M - cls_num) / batch_size)
-                if J < min_J:
-                    min_J = J
-                    opt_M = M
-        ###############################################################################################
-
-        opt_M = cls_num
-        kmeans = KMeans(n_clusters=opt_M, init='k-means++', random_state=self.seed)
-        kmeans.fit_predict(features)
-        cluster_labels = kmeans.labels_
-        
-        ## Initialize mask(positive sign) and logits_mask(take part in contrastive loss caclutation sign) 
-        mask, logits_mask = torch.zeros(batch_size, batch_size, device=self.device), torch.zeros(batch_size, batch_size, device=self.device)
-        for i in range(batch_size):
-            for j in range(i + 1, batch_size):
-                ## Hard negative: Intra-class instances, purpose: split, increase intra-class variation 
-                if cluster_labels[i] == cluster_labels[j] and labels[i] != labels[j]:
-                    logits_mask[i, j] = logits_mask[j, i] = 1
-                ## Hard positive: Inter-class instances, purpose: aggregation 
-                elif cluster_labels[i] != cluster_labels[j] and labels[i] == labels[j]:
-                    logits_mask[i, j] = logits_mask[j, i] = 1
-                    mask[i, j] = mask[j, i] = 1
-
-        ### Prevent the condition where is no negative samples result in loss=0
-        labels = torch.tensor(labels, device=self.device)
-        B = logits_mask.shape[0]
-        ## loss_valid_mask is for conditions where there is no negative sample for a given sample, which would result in loss=0.
-        loss_valid_mask = torch.ones(B, dtype=torch.bool, device=logits_mask.device)
-        # Get the sample's indice array which the whole row logits_mask is zero
-        zero_mask_idx = torch.nonzero(logits_mask.sum(1) == 0).squeeze(1)
-        for idx in zero_mask_idx:
-            # Gather all negative sample indices (for different labels)
-            neg_sample_idices = torch.nonzero(~(labels == labels[idx])).squeeze(1)
-            if  neg_sample_idices.shape[0] == 0:
-            # No negative samples, set False, this sample will not take part in loss calculation  
-                loss_valid_mask[idx] = False
-                continue  
-            indices = torch.randperm(neg_sample_idices.shape[0])
-            num_neg = min(3, neg_sample_idices.shape[0])
-            selected_neg = neg_sample_idices[indices[:num_neg]]
-            logits_mask[idx, selected_neg] = 1
-
-        return mask, logits_mask, loss_valid_mask
-
-
-class WLoss(nn.Module):
-    def __init__(self, weights):
-        super(WLoss, self).__init__()
-        self.weights = weights
-
-    def forward(self, inputs):
-        total_loss = 0
-        for i in range(len(self.weights)):
-            total_loss += self.weights[i] * inputs[i]
-        return total_loss
