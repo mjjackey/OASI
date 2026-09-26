@@ -122,6 +122,7 @@ def eval_or_test(model, loader, mode):
 
 FROM_PRE_TRAINED = False
 FROM_PRE_TRAINED_WHOLE = False
+GRADIENT_CHECK= True
 def main():
     _, idx2label = get_dicts(args.dataset)
     num_classes = len(idx2label.items())
@@ -129,7 +130,7 @@ def main():
     class_names = [v for k, v in sorted(idx2label.items(), key=lambda item: item[0])]
 
     # _tau_ov{args.temperature_ov}
-    ckpt_name = f"best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}.pt" 
+    ckpt_name = f"best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_tau_ov{args.tau_ov}.pt" 
     ckpt_path = os.path.join(args.save_dir, ckpt_name)
     if FROM_PRE_TRAINED:
         if not os.path.exists(ckpt_path):
@@ -158,11 +159,12 @@ def main():
 
     model.to(args.device)
     # Gradient checkpointing
-    # if hasattr(model.roberta, "gradient_checkpointing_enable"):
-    #     model.roberta.gradient_checkpointing_enable()
-    # else:
-    #     print("gradient checkpoint not available for this transformers version")
-    model.encoder.gradient_checkpointing_enable()
+    if GRADIENT_CHECK:
+        # if hasattr(model.roberta, "gradient_checkpointing_enable"):
+        #     model.roberta.gradient_checkpointing_enable()
+        # else:
+        #     print("gradient checkpoint not available for this transformers version")
+        model.encoder.gradient_checkpointing_enable()
 
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
@@ -292,7 +294,7 @@ def wandb_init(args):
                 "encode_type": args.encoder_type,
                 "device_id": args.device_id,
                 "save_dir": args.save_dir,
-                "start_epoch": args.start_epoch,
+                # "start_epoch": args.start_epoch,
             }
     if not FROM_PRE_TRAINED:
         name=None
@@ -309,7 +311,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='goemotions')
     parser.add_argument('--batch_size', type=int, default=4)  # original: 64
-    parser.add_argument('--accum_iter', type=int, default=8)
+    parser.add_argument('--accum_iter', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--encoder_type', type=str, default='roberta-base')
     parser.add_argument('--seed', type=int, default=0)
@@ -326,7 +328,7 @@ if __name__ == '__main__':
     parser.add_argument('--alpha_ov', type=float, default=5.0)
     parser.add_argument('--device_id', type=str, default="0")
     parser.add_argument('--save_dir', type=str, default='../output')
-    parser.add_argument("--start_epoch", type=int, default=4, help="resume starting epoch")
+    # parser.add_argument("--start_epoch", type=int, default=4, help="resume starting epoch")
 
     args = parser.parse_args()
     args.device = torch.device("cuda:" + args.device_id if torch.cuda.is_available() else "cpu")
