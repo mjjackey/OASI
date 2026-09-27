@@ -234,7 +234,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='goemotions')
     parser.add_argument('--batch_size', type=int, default=4)  # original: 64
-    parser.add_argument('--accum_iter', type=int, default=8)
+    parser.add_argument('--accum_iter', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--encoder_type', type=str, default='roberta-base')
     parser.add_argument('--seed', type=int, default=0)

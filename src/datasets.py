@@ -268,7 +268,7 @@ class emotion_DataSet(Dataset):
             # single label
             label=row["label"]
         
-        lbl_ids_str = row["raw_label_ids"]
+        lbl_ids_str = row["label_ids"]
         lbl_ids = [int(x.strip()) for x in lbl_ids_str.split(",")]
         row_lbl_set = set(lbl_ids)
 
