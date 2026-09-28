@@ -25,12 +25,13 @@ class CrossEncoder(nn.Module):
         self.encoder_type = args.encoder_type
         self.device = args.device
         self.alpha = args.alpha
-        self.gamma = args.gamma
         self.seed = args.seed
         self.temperature = args.temperature
         self.lambda_contrast = args.lambda_contrast
         self.warmup_epochs = args.warmup_epochs
         # self.base_temperature = args.base_temperature
+        self.tau_ov= args.tau_ov
+        self.alpha_ov = args.alpha_ov
 
         label_description = ED_description if args.dataset == 'ED' else GE_description
         max_seq_len = 128 if args.dataset == 'goemotions' else 64
@@ -88,7 +89,7 @@ class CrossEncoder(nn.Module):
         #                                                self.alpha,
         #                                                self.gamma)
 
-    def forward(self, input_ids, attention_mask, labels, soft_p_tensor,lbl_set_list,current_epoch=0):
+    def forward(self, input_ids=None, attention_mask=None, labels=None, soft_p_tensor=None,lbl_set_list=None,current_epoch=0):
         """
         Args:
             input_ids: token_id, shape: [batch_size, seq_len] 
@@ -122,7 +123,7 @@ class CrossEncoder(nn.Module):
         if current_epoch < self.warmup_epochs:
             contra_loss = torch.tensor(0.0, device= self.args.device)
         else:
-            contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature)
+            contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature,self.tau_ov,self.alpha_ov)
 
         # if __debug__:
         #     print(f"cls_loss: {cls_loss.item()}, contrastive loss: {contra_loss.item()}")
@@ -137,8 +138,8 @@ class CrossEncoder(nn.Module):
         labels: torch.Tensor,
         lbl_set_list: list,
         tau: float = 0.07,
-        tau_o: float = 0.3,
-        alpha: float = 5.0,
+        tau_ov: float = 0.3,
+        alpha_ov: float = 5.0,
         eps: float = 1e-8
     ) -> torch.Tensor:
         """
@@ -185,16 +186,16 @@ class CrossEncoder(nn.Module):
            
         # Overlap-aware soft weight w_ov
         w_ov = torch.where(
-            jac_ov_sim <= tau_o,
+            jac_ov_sim <= tau_ov,
             torch.ones_like(jac_ov_sim),
-            torch.exp(-alpha * jac_ov_sim)
+            torch.exp(-alpha_ov * jac_ov_sim)
         )
 
         # Total weight: annotator similarity * overlap penalty
         # w_total = w_annotator * w_ov
 
         # 3. overlap‑aware mask: positive candidate mask (same label)
-        pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B]
+        pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B] 
         # exclude self‑pair i == i
         self_mask = 1.0 - torch.eye(B, device = features_norm.device)
         # for i in range(B):
@@ -215,5 +216,7 @@ class CrossEncoder(nn.Module):
         # InfoNCE per‑sample loss
         per_sample_loss = -torch.log((numerator + eps) / (denominator + eps))
         loss = torch.mean(per_sample_loss)
+        # sum_loss = torch.sum(per_sample_loss)
+        # print(f"loss: {loss.item()}, sum_loss: {sum_loss.item()}")  # debug
 
         return loss

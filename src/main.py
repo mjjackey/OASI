@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 import pandas as pd
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModel
-from transformers import AdamW, get_linear_schedule_with_warmup
+from transformers import AdamW, get_linear_schedule_with_warmup,RobertaForSequenceClassification
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from torch.nn import functional as F
@@ -26,7 +26,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
+def train(model, train_loader, opt, scheduler, accum_iter, current_epoch, global_step):
     scaler = GradScaler()
     model.train()
 
@@ -40,10 +40,11 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
         ## Invoke forward() function,   enabled=False
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16): 
             # logits' shape: [batch_size, num_class]
-            lbl_pred_logits, cls_loss, contra_loss, loss = model(input_ids, attention_mask, labels, soft_p_tensor,  lbl_set_list, current_epoch)
+            lbl_pred_logits, cls_loss, contra_loss, loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, \
+                                                                 soft_p_tensor=soft_p_tensor,  lbl_set_list=lbl_set_list, current_epoch=current_epoch)
         
-            if torch.isnan(loss).any():
-                print(f">>> detect nan in total loss")
+            if torch.isnan(loss).any() or torch.any(torch.isinf(loss)):
+                print(f">>> detect nan or inf in total loss")
                 raise RuntimeError("loss is nan before backward")
 
              # Gradient accumulation
@@ -64,6 +65,9 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
             opt.zero_grad()
             # only step scheduler when weights updated
             scheduler.step() 
+            global_step += 1
+            ## Log the metrics to wandb
+            wandb.log({"global_step": global_step, "lr": scheduler.get_last_lr()[0]})
    
         epoch_loss += batch_loss
         all_preds.extend(torch.argmax(lbl_pred_logits, dim=-1).tolist())
@@ -84,7 +88,7 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch):
           f'f1 : {train_weighted_f1:.04f}, '
           f'macro_f1 : {macro_f1:.04f}')
 
-    return train_avg_loss, train_acc, train_weighted_f1, macro_f1
+    return train_avg_loss, train_acc, train_weighted_f1, macro_f1, global_step
 
 
 def eval_or_test(model, loader, mode):
@@ -93,7 +97,7 @@ def eval_or_test(model, loader, mode):
     all_logits = []
     total_loss,all_preds, all_labels = 0, [], []
     with torch.no_grad():
-        for input_ids, attention_mask, labels, soft_p_tensor, lbl_set_list in loader:
+        for input_ids, attention_mask, labels, soft_p_tensor, lbl_set_list in tqdm(loader):
             input_ids, attention_mask, labels, soft_p_tensor = input_ids.to(args.device), attention_mask.to(args.device), \
                                                             labels.to(args.device), soft_p_tensor.to(args.device)
             logits, _, _, loss = model(input_ids, attention_mask, labels, soft_p_tensor,lbl_set_list)
@@ -116,24 +120,23 @@ def eval_or_test(model, loader, mode):
     return eval_avg_loss, acc, weighted_f1, macro_f1
 
 
-def softmax(x, axis=None):
-    e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
-    return e_x / e_x.sum(axis=axis, keepdims=True)
-
-
+FROM_PRE_TRAINED = False
+FROM_PRE_TRAINED_WHOLE = False
+GRADIENT_CHECK= True
 def main():
-    label2idx, idx2label = get_dicts(args.dataset)
+    _, idx2label = get_dicts(args.dataset)
     num_classes = len(idx2label.items())
     print("num_classes: ", num_classes)
     class_names = [v for k, v in sorted(idx2label.items(), key=lambda item: item[0])]
 
-    args.encode_type = "roberta-base"
-
-    model_path = os.path.abspath(args.encoder_type)
-    print(f"model_path = {model_path}")
-    print(f"exists? {os.path.exists(model_path)}")
-    print(f"is dir? {os.path.isdir(model_path)}")
-
+    # _tau_ov{args.temperature_ov}
+    ckpt_name = f"best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_tau_ov{args.tau_ov}.pt" 
+    ckpt_path = os.path.join(args.save_dir, ckpt_name)
+    if FROM_PRE_TRAINED:
+        if not os.path.exists(ckpt_path):
+            print(f"model_path {ckpt_path} does not exist, please check the path")
+            sys.exit(1)
+        
     tkr = AutoTokenizer.from_pretrained("roberta-base")
     special_tokens_dict = {'additional_special_tokens': ["<#>"]}
     tkr.add_special_tokens(special_tokens_dict)
@@ -147,26 +150,68 @@ def main():
 
     ## Construct the model
     model = CrossEncoder(args, num_classes, tkr)
+    if FROM_PRE_TRAINED:
+        # model = RobertaForSequenceClassification.from_pretrained(args.encoder_type, num_labels=num_classes)
+        # # Ensure classifier head matches 27 classes even if ckpt config differs.
+        # model.classifier = torch.nn.Linear(model.config.hidden_size, num_classes)
+        state_dict = torch.load(ckpt_path, map_location=args.device)
+        model.load_state_dict(state_dict,strict=False)
+
     model.to(args.device)
     # Gradient checkpointing
-    model.encoder.gradient_checkpointing_enable()
+    if GRADIENT_CHECK:
+        # if hasattr(model.roberta, "gradient_checkpointing_enable"):
+        #     model.roberta.gradient_checkpointing_enable()
+        # else:
+        #     print("gradient checkpoint not available for this transformers version")
+        model.encoder.gradient_checkpointing_enable()
 
-    opt = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay) 
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": args.weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    # opt = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay) 
+    opt = AdamW(optimizer_grouped_parameters, lr=args.lr, eps=1e-8)
+
     ## Compute real update steps
-    total_update_steps = (len(train_loader) // args.accum_iter) * args.epochs
-    ### If observe train loss oscillates, increase `warmup_ratio` to `0.08`.
+    # len(train_loader): the number of batches per epoch, args.accum_iter: optimiser.step() is called every args.accum_iter batches
+    update_per_epoch =  (len(train_loader) // args.accum_iter) 
+    total_update_steps = update_per_epoch * args.epochs
     warmup_ratio = 0.06
+    start_epochs = 0
+    ### If observe train loss oscillates, increase `warmup_ratio` to `0.08`.
+    if FROM_PRE_TRAINED: 
+        warmup_ratio = 0.1
+        start_epochs = args.start_epoch
+        remaining_epochs = args.epochs - args.start_epoch
+        total_update_steps = max(remaining_epochs, 0) * update_per_epoch
+
     warmup_steps = int(total_update_steps * warmup_ratio)
     scheduler = get_linear_schedule_with_warmup(
                 optimizer=opt,
                 num_warmup_steps=warmup_steps,
                 num_training_steps=total_update_steps
     )
-    early_stopping = EarlyStopping(args, patience=args.patience, delta=1e-4, type='macro_f1', path='../output/mlp_' + args.device_id +'_'+ args.dataset + '.pt')
+    if FROM_PRE_TRAINED_WHOLE:
+        state_dict = torch.load(ckpt_path, map_location=args.device)
+        opt.load_state_dict(state_dict["opt_state_dict"])
+        scheduler.load_state_dict(state_dict["scheduler_state_dict"])
+        start_epochs = state_dict["epoch"] + 1
+        global_step = state_dict["global_step"]
+    
+    early_stopping = EarlyStopping(args,patience=args.patience, delta=1e-4, type='macro_f1', path=ckpt_path)
 
     # for args.seed in [42,123,777]:
     #     for args.lambda_contrast in [0.1,0.05]:
     best_val_macro = 0
+    global_step = 0
     # ========== WandB init ==========
     # run = wandb.init(
     #     project="goemotion_soft_infonce",
@@ -184,51 +229,83 @@ def main():
     #     },
     #     reinit=True
     # )
-    for epoch in range(args.epochs):
-        print(f'----------- {epoch + 1} -------------')
+    try: 
+        for epoch in range(start_epochs,args.epochs):
+            print(f'----------- {epoch + 1} -------------')
 
-        train_loss, train_acc, train_f1, train_macro_f1 = train(model, train_loader, opt, scheduler, args.accum_iter, epoch)
-        eval_loss, eval_acc, eval_f1, eval_macro_f1 = eval_or_test(model, valid_loader, 'Eval')
-        if eval_macro_f1 > best_val_macro:
-            best_val_macro = eval_macro_f1
+            train_loss, train_acc, train_f1, train_macro_f1, global_step = train(model, train_loader, opt, scheduler, args.accum_iter, epoch,  global_step)
+            eval_loss, eval_acc, eval_f1, eval_macro_f1 = eval_or_test(model, valid_loader, 'Eval')
+            if eval_macro_f1 > best_val_macro:
+                best_val_macro = eval_macro_f1
+            wandb.log({
+                'train_loss': train_loss,
+                'train_acc': train_acc,
+                'train_f1': train_f1,
+                'train_macro_f1': train_macro_f1,
+                'eval_loss': eval_loss,
+                'eval_acc': eval_acc,
+                'eval_f1': eval_f1,
+                'eval_macro_f1': eval_macro_f1
+            },step=global_step)
+
+            early_stopping(val_loss=eval_loss, val_metric=eval_macro_f1, model=model, \
+                            optimiser=opt,scheduler=scheduler,epoch=epoch,global_step=global_step)
+            if early_stopping.early_stop:
+                print(f"+++ early stop at epoch {epoch + 1 - args.patience} +++")
+                break
+
+        print(f'----------- test -------------')
+        # model.load_state_dict(ckpt_path, map_location=args.device)
+        state_dict = torch.load(ckpt_path, map_location=args.device)
+        model.load_state_dict(state_dict,strict=False)
+        test_loss, test_acc, test_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test')
+        print('test_acc: ', {test_acc}, 'test_f1: ', {test_f1}, 'test_macro_f1: ', {test_macro_f1})
         wandb.log({
-            'train_loss': train_loss,
-            'train_acc': train_acc,
-            'train_f1': train_f1,
-            'train_macro_f1': train_macro_f1,
-            'eval_loss': eval_loss,
-            'eval_acc': eval_acc,
-            'eval_f1': eval_f1,
-            'eval_macro_f1': eval_macro_f1
-        },step=epoch)
+            'test_loss': test_loss,
+            'test_acc': test_acc,
+            'test_f1': test_f1,
+            'test_macro_f1': test_macro_f1,
+        },global_step)
 
-        early_stopping(val_loss=eval_loss, val_metric=eval_macro_f1, model=model)
-        if early_stopping.early_stop:
-            print(f"+++ early stop at epoch {epoch + 1 - args.patience} +++")
-            break
+        wandb.summary["test_acc"] = test_acc
+        wandb.summary["test_weighted_f1"] = test_f1
+        wandb.summary["test_macro_f1"] = test_macro_f1
+        wandb.summary["best_val_macro_f1"] = best_val_macro
+    
+    except KeyboardInterrupt:
+        print("==== KeyboardInterrupt: User Ctrl+C stopped training ====")
+    except Exception as e:
+        print(f"==== Training exception caught: {type(e).__name__}: {e}")
+        raise
+    finally:
+        gc.collect()
+        torch.cuda.empty_cache()
+        print("==== Call wandb.finish() ====")
+        wandb.finish()
 
-    # model.load_state_dict(torch.load('../mlp' + args.device_id + args.dataset + '.pt', map_location=args.device))
-    print(f'----------- test -------------')
-    ckpt_name = f"best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}.pt"
-    model.load_state_dict(torch.load(os.path.join(args.save_dir, ckpt_name), map_location=args.device))
-    test_loss, test_acc, test_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test')
-    print('test_acc: ', {test_acc}, 'test_f1: ', {test_f1}, 'test_marco_f1: ', {test_macro_f1})
-    wandb.log({
-        'test_loss': test_loss,
-        'test_acc': test_acc,
-        'test_f1': test_f1,
-        'test_macro_f1': test_macro_f1,
-    })
-
-    wandb.summary["test_acc"] = test_acc
-    wandb.summary["test_weighted_f1"] = test_f1
-    wandb.summary["test_macro_f1"] = test_macro_f1
-    wandb.summary["best_val_macro_f1"] = best_val_macro
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    wandb.finish()
-
+def wandb_init(args):
+    project="goemotion_soft_infonce"
+    config={
+                "batch_size": args.batch_size,
+                "accum_iter": args.accum_iter,
+                "effective_batch": args.batch_size * args.accum_iter,
+                "lr": args.lr,
+                "dataset": args.dataset,
+                "encode_type": args.encoder_type,
+                "device_id": args.device_id,
+                "save_dir": args.save_dir,
+                # "start_epoch": args.start_epoch,
+            }
+    if not FROM_PRE_TRAINED:
+        name=None
+        notes=None
+    else:
+        name="resume_from_epoch4_best_ckpt"
+        notes="load model weights from epoch4 best ckpt; optimizer & scheduler reinitialized, no opt state saved"
+    wandb.init(project=project, name=name, config=config, notes=notes) # Initialize wandb
+    cfg = wandb.config
+    for k,v in cfg.items():
+        setattr(args, k, v)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -242,38 +319,21 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=0.01) # original: 0.001
     parser.add_argument('--patience', type=int, default=4) # 2  # original: 4
     parser.add_argument('--alpha', type=float, default=0.05) #0.05, 0.1, 0.2 original: 0.4
-    parser.add_argument('--eta', type=float, default=0.1)
-    parser.add_argument('--gamma', type=float, default=0.4)
     parser.add_argument('--warmup_epochs', type=int, default=2)
     # parser.add_argument('--temperature', type=float, default=0.2) #0.15,0.2,0.3 original: 0.5
     # parser.add_argument('--base_temperature', type=float, default=0.07)
     parser.add_argument('--temperature', type=float, default=0.07) # 0.05~0.1
     parser.add_argument('--lambda_contrast', type=float, default=0.1) # 0.1~1.0
+    parser.add_argument('--tau_ov', type=float, default=0.3)
+    parser.add_argument('--alpha_ov', type=float, default=5.0)
     parser.add_argument('--device_id', type=str, default="0")
     parser.add_argument('--save_dir', type=str, default='../output')
+    # parser.add_argument("--start_epoch", type=int, default=4, help="resume starting epoch")
 
     args = parser.parse_args()
     args.device = torch.device("cuda:" + args.device_id if torch.cuda.is_available() else "cpu")
 
-    run = wandb.init(
-        project="goemotion_soft_infonce",
-        name=None,
-        config={
-            "batch_size": args.batch_size,
-            "accum_iter": args.accum_iter,
-            "effective_batch": args.batch_size * args.accum_iter,
-            "lr": args.lr,
-            "model_type": args.encoder_type,
-            "dataset": args.dataset,
-            "encode_type": args.encoder_type,
-            "device_id": args.device_id,
-            "save_dir": args.save_dir,
-        },
-    )
-
-    cfg = wandb.config
-    for k,v in cfg.items():
-        setattr(args, k, v)
+    wandb_init(args) # Initialize wandb
 
     random.seed(args.seed)
     np.random.seed(args.seed)

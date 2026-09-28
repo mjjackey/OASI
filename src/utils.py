@@ -15,7 +15,7 @@ import datetime
 
 
 class EarlyStopping:
-    def __init__(self, args, patience=2, delta=0, path='checkpoint.pt', type='acc'):
+    def __init__(self, args, patience=2, delta=0, type='acc', path='../output'):
         """
         Args:
             args: command line arguments
@@ -32,10 +32,10 @@ class EarlyStopping:
         self.early_stop = False
         self.val_loss_min = np.Inf
         self.delta = delta
-        self.path = path
         self.type = type
+        self.path = path
 
-    def __call__(self, val_loss, val_metric, model):
+    def __call__(self, val_loss, val_metric, model, optimiser, scheduler, epoch, global_step):
         """
         val_loss: validation loss value (only for logging)
         val_metric: metric value used for early‑stop judgment
@@ -52,7 +52,7 @@ class EarlyStopping:
 
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(val_loss, model)
+            self.save_checkpoint(self.path,val_loss, model, optimiser, scheduler, epoch, global_step)
         elif score < self.best_score + self.delta:
             # no valid improvement observed
             self.counter += 1
@@ -62,14 +62,17 @@ class EarlyStopping:
         else:
             # metric improved, update best and save checkpoint
             self.best_score = score
-            self.save_checkpoint(val_loss, model)
+            self.save_checkpoint(self.path,val_loss, model, optimiser, scheduler,epoch, global_step)
             self.counter = 0
 
-    def save_checkpoint(self, val_loss, model):
+    def save_checkpoint(self, path, val_loss, model,optimiser, scheduler, epoch,global_step):
         """Save model state dict when monitored metric reaches new best. """
         print(f"Metric improved ({self.best_score:.4f}). Saving model ...")
-        # torch.save(model.state_dict(), self.path)
-        ckpt_name = f"best_seed{self.args.seed}_lc{self.args.lambda_contrast}_tau{self.args.temperature}.pt"
-        torch.save(model.state_dict(), os.path.join(self.args.save_dir, ckpt_name))
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimiser.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'global_step': global_step
+        }, path)
         self.val_loss_min = val_loss
-
