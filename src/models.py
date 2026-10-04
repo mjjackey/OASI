@@ -98,7 +98,8 @@ class CrossEncoder(nn.Module):
             soft_p_tensor: soft probability tensor, shape: [batch_size, num_classes]
         Parameters get from model(input_ids, attention_mask, labels) in train() which gets form dataloader
         """
-        # Get projection head, last_hidden_state, shape: [batch_size, seq_len, hidden_size] --> CLS token representation[batch_size, hidden_size]-->[batch_size,out_dim]
+        # Get projection head, last_hidden_state, shape: [batch_size, seq_len, hidden_size]  
+        # --> CLS token representation[batch_size, hidden_size]-->[batch_size,out_dim]
         features = self.head(self.encoder(input_ids=input_ids, attention_mask=attention_mask)[0][:, 0, :])
         # output shape: [num_labels, hidden_size]
         label_emb = self.encoder(input_ids=self.label_input_ids, attention_mask=self.label_attn_masks)[0][:, 0, :]

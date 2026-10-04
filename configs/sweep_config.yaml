@@ -5,7 +5,7 @@ project: goemotion_softinfonce
 
 parameters:
   seed:
-    values: [42, 123] 
+    values: [777, 2025] 
     # values: [42, 123, 777, 999, 2025]
   lambda_contrast:
     values: [0.1]  #[0.02, 0.05, 0.08, 0.10, 0.15]
