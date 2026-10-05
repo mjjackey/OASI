@@ -17,6 +17,7 @@ import datetime
 from description import ED_description, GE_description
 
 DEBUG_K_M = False
+WARM_UP = False
 class CrossEncoder(nn.Module):
     def __init__(self, args, num_labels, tkr, head='mlp', features_dim=128):
         super(CrossEncoder, self).__init__()
@@ -120,8 +121,11 @@ class CrossEncoder(nn.Module):
         #     contra_loss = self.wloss([loss_ccl, loss_ldl])
         # else:
         #     sys.exit()
-        if current_epoch < self.warmup_epochs:
-            contra_loss = torch.tensor(0.0, device= self.args.device)
+        if WARM_UP:
+            if current_epoch < self.warmup_epochs:
+                contra_loss = torch.tensor(0.0, device= self.args.device)
+            else:
+                contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature,self.tau_ov,self.alpha_ov)
         else:
             contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature,self.tau_ov,self.alpha_ov)
 
@@ -168,28 +172,28 @@ class CrossEncoder(nn.Module):
         sim_z = torch.matmul(features_norm, features_norm.T)  # [B, B]
 
         # 2. weight matrix w_ij: cosine similarity of annotator distribution p_i, p_j
-        w_annotator = F.cosine_similarity(
-            soft_p.unsqueeze(1),   # [B,1,27]
-            soft_p.unsqueeze(0),   # [1,B,27]
-            dim=-1
-        )  # [B,B]
+        # w_annotator = F.cosine_similarity(
+        #     soft_p.unsqueeze(1),   # [B,1,27]
+        #     soft_p.unsqueeze(0),   # [1,B,27]
+        #     dim=-1
+        # )  # [B,B]
 
-        # Precompute Jaccard overlap o_ij [B,B]
-        jac_ov_sim = torch.zeros((B,B), dtype=torch.float32, device=features_norm.device)
-        for i in range(B):
-            for j in range(B):
-                si = lbl_set_list[i]
-                sj = lbl_set_list[j]
-                inter = len(si & sj)
-                union = len(si | sj)
-                jac_ov_sim[i,j] = inter / union if union > 0 else 0.0
+        # # Precompute Jaccard overlap o_ij [B,B]
+        # jac_ov_sim = torch.zeros((B,B), dtype=torch.float32, device=features_norm.device)
+        # for i in range(B):
+        #     for j in range(B):
+        #         si = lbl_set_list[i]
+        #         sj = lbl_set_list[j]
+        #         inter = len(si & sj)
+        #         union = len(si | sj)
+        #         jac_ov_sim[i,j] = inter / union if union > 0 else 0.0
            
-        # Overlap-aware soft weight w_ov
-        w_ov = torch.where(
-            jac_ov_sim <= tau_ov,
-            torch.ones_like(jac_ov_sim),
-            torch.exp(-alpha_ov * jac_ov_sim)
-        )
+        # # Overlap-aware soft weight w_ov
+        # w_ov = torch.where(
+        #     jac_ov_sim <= tau_ov,
+        #     torch.ones_like(jac_ov_sim),
+        #     torch.exp(-alpha_ov * jac_ov_sim)
+        # )
 
         # Total weight: annotator similarity * overlap penalty
         # w_total = w_annotator * w_ov
@@ -209,13 +213,14 @@ class CrossEncoder(nn.Module):
         exp_sim = torch.exp(sim_z / tau)
 
         # numerator: sum over valid positive pairs: w_total * exp(sim_ij/tau)
-        numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask.float(), dim=-1)  # [B]
+        # numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask.float(), dim=-1)  # [B]
+        numerator = torch.sum(exp_sim * pos_candidate_mask.float(), dim=-1)  # [B]
 
         # denominator: sum over all j≠i (all candidates, positive + negative)
-        # denominator = torch.sum(exp_sim * w_ov * self_mask.float(), dim=-1)  # [B]
-        term_pos_in_den = torch.sum(exp_sim * pos_candidate_mask.float(), dim=-1)
-        term_neg_in_den = torch.sum(exp_sim * w_ov * neg_candidate_mask.float(), dim=-1)
-        denominator = term_pos_in_den + term_neg_in_den
+        denominator = torch.sum(exp_sim * self_mask.float(), dim=-1)  # [B]
+        # term_pos_in_den = torch.sum(exp_sim * pos_candidate_mask.float(), dim=-1)
+        # term_neg_in_den = torch.sum(exp_sim * w_ov * neg_candidate_mask.float(), dim=-1)
+        # denominator = term_pos_in_den + term_neg_in_den
 
         # InfoNCE per‑sample loss
         per_sample_loss = -torch.log((numerator + eps) / (denominator + eps))

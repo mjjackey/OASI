@@ -122,7 +122,7 @@ def eval_or_test(model, loader, mode):
 
 FROM_PRE_TRAINED = False
 FROM_PRE_TRAINED_WHOLE = False
-GRADIENT_CHECK= True
+GRADIENT_CHECK= False
 def main():
     _, idx2label = get_dicts(args.dataset)
     num_classes = len(idx2label.items())
@@ -316,10 +316,10 @@ if __name__ == '__main__':
     parser.add_argument('--encoder_type', type=str, default='roberta-base')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--lr', type=float, default=2e-05)
-    parser.add_argument('--weight_decay', type=float, default=0.01) # original: 0.001
+    parser.add_argument('--weight_decay', type=float, default=0.001) # original: 0.001
     parser.add_argument('--patience', type=int, default=4) # 2  # original: 4
-    parser.add_argument('--alpha', type=float, default=0.05) #0.05, 0.1, 0.2 original: 0.4
-    parser.add_argument('--warmup_epochs', type=int, default=2)
+    # parser.add_argument('--alpha', type=float, default=0.05) #0.05, 0.1, 0.2 original: 0.4
+    parser.add_argument('--warmup_epochs', type=int, default=0)
     # parser.add_argument('--temperature', type=float, default=0.2) #0.15,0.2,0.3 original: 0.5
     # parser.add_argument('--base_temperature', type=float, default=0.07)
     parser.add_argument('--temperature', type=float, default=0.07) # 0.05~0.1
