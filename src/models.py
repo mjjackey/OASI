@@ -17,6 +17,7 @@ import datetime
 from description import ED_description, GE_description
 
 DEBUG_K_M = False
+WARM_UP = False
 class CrossEncoder(nn.Module):
     def __init__(self, args, num_labels, tkr, head='mlp', features_dim=128):
         super(CrossEncoder, self).__init__()
@@ -24,7 +25,7 @@ class CrossEncoder(nn.Module):
         self.num_labels = num_labels
         self.encoder_type = args.encoder_type
         self.device = args.device
-        self.alpha = args.alpha
+        # self.alpha = args.alpha
         self.seed = args.seed
         self.temperature = args.temperature
         self.lambda_contrast = args.lambda_contrast
@@ -120,11 +121,13 @@ class CrossEncoder(nn.Module):
         #     contra_loss = self.wloss([loss_ccl, loss_ldl])
         # else:
         #     sys.exit()
-        if current_epoch < self.warmup_epochs:
-            contra_loss = torch.tensor(0.0, device= self.args.device)
+        if WARM_UP:
+            if current_epoch < self.warmup_epochs:
+                contra_loss = torch.tensor(0.0, device= self.args.device)
+            else:
+                contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature,self.tau_ov,self.alpha_ov)
         else:
             contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature,self.tau_ov,self.alpha_ov)
-
         # if __debug__:
         #     print(f"cls_loss: {cls_loss.item()}, contrastive loss: {contra_loss.item()}")
         total_loss = cls_loss + self.lambda_contrast * contra_loss
