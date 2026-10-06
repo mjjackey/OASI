@@ -132,7 +132,7 @@ def main():
     # _tau_ov{args.temperature_ov}
     ckpt_name = f"best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_tau_ov{args.tau_ov}.pt" 
     ckpt_path = os.path.join(args.save_dir, ckpt_name)
-    if FROM_PRE_TRAINED:
+    if FROM_PRE_TRAINED_WHOLE:
         if not os.path.exists(ckpt_path):
             print(f"model_path {ckpt_path} does not exist, please check the path")
             sys.exit(1)
@@ -199,12 +199,6 @@ def main():
                 num_warmup_steps=warmup_steps,
                 num_training_steps=total_update_steps
     )
-    if FROM_PRE_TRAINED_WHOLE:
-        state_dict = torch.load(ckpt_path, map_location=args.device)
-        opt.load_state_dict(state_dict["opt_state_dict"])
-        scheduler.load_state_dict(state_dict["scheduler_state_dict"])
-        start_epochs = state_dict["epoch"] + 1
-        global_step = state_dict["global_step"]
     
     early_stopping = EarlyStopping(args,patience=args.patience, delta=1e-4, type='macro_f1', path=ckpt_path)
 
@@ -212,6 +206,13 @@ def main():
     #     for args.lambda_contrast in [0.1,0.05]:
     best_val_macro = 0
     global_step = 0
+
+    if FROM_PRE_TRAINED_WHOLE:
+        state_dict = torch.load(ckpt_path, map_location=args.device)
+        opt.load_state_dict(state_dict["optimizer_state_dict"])
+        scheduler.load_state_dict(state_dict["scheduler_state_dict"])
+        start_epochs = state_dict["epoch"] + 1
+        global_step = state_dict["global_step"]
     # ========== WandB init ==========
     # run = wandb.init(
     #     project="goemotion_soft_infonce",
@@ -296,12 +297,15 @@ def wandb_init(args):
                 "save_dir": args.save_dir,
                 # "start_epoch": args.start_epoch,
             }
-    if not FROM_PRE_TRAINED:
-        name=None
-        notes=None
-    else:
+    
+    name=None
+    notes=None
+    if FROM_PRE_TRAINED:
         name="resume_from_epoch4_best_ckpt"
         notes="load model weights from epoch4 best ckpt; optimizer & scheduler reinitialized, no opt state saved"
+    elif FROM_PRE_TRAINED_WHOLE:
+        name="resume_from_epoch_best_ckpt"
+        notes="load model weights, optimizer & scheduler from epoch best ckpt"
     wandb.init(project=project, name=name, config=config, notes=notes) # Initialize wandb
     cfg = wandb.config
     for k,v in cfg.items():
@@ -316,10 +320,10 @@ if __name__ == '__main__':
     parser.add_argument('--encoder_type', type=str, default='roberta-base')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--lr', type=float, default=2e-05)
-    parser.add_argument('--weight_decay', type=float, default=0.01) # original: 0.001
+    parser.add_argument('--weight_decay', type=float, default=0.001) # original: 0.001
     parser.add_argument('--patience', type=int, default=4) # 2  # original: 4
-    parser.add_argument('--alpha', type=float, default=0.05) #0.05, 0.1, 0.2 original: 0.4
-    parser.add_argument('--warmup_epochs', type=int, default=2)
+    # parser.add_argument('--alpha', type=float, default=0.05) #0.05, 0.1, 0.2 original: 0.4
+    parser.add_argument('--warmup_epochs', type=int, default=0)
     # parser.add_argument('--temperature', type=float, default=0.2) #0.15,0.2,0.3 original: 0.5
     # parser.add_argument('--base_temperature', type=float, default=0.07)
     parser.add_argument('--temperature', type=float, default=0.07) # 0.05~0.1
