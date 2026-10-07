@@ -18,6 +18,8 @@ from description import ED_description, GE_description
 
 DEBUG_K_M = False
 WARM_UP = False
+FULLMODE = True
+SUPCONBASE = False
 class CrossEncoder(nn.Module):
     def __init__(self, args, num_labels, tkr, head='mlp', features_dim=128):
         super(CrossEncoder, self).__init__()
@@ -134,7 +136,6 @@ class CrossEncoder(nn.Module):
 
         return lbl_logits, cls_loss, contra_loss, total_loss
 
-
     def soft_info_nce_loss(self,
         features_norm: torch.Tensor,
         soft_p: torch.Tensor,
@@ -212,13 +213,18 @@ class CrossEncoder(nn.Module):
         exp_sim = torch.exp(sim_z / tau)
 
         # numerator: sum over valid positive pairs: w_total * exp(sim_ij/tau)
-        numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask.float(), dim=-1)  # [B]
+        if SUPCONBASE == True:
+            numerator = torch.sum(exp_sim  * pos_candidate_mask.float(), dim=-1)
+        if FULLMODE == True:
+            numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask.float(), dim=-1)  # [B]
 
         # denominator: sum over all j≠i (all candidates, positive + negative)
-        # denominator = torch.sum(exp_sim * w_ov * self_mask.float(), dim=-1)  # [B]
-        term_pos_in_den = torch.sum(exp_sim * pos_candidate_mask.float(), dim=-1)
-        term_neg_in_den = torch.sum(exp_sim * w_ov * neg_candidate_mask.float(), dim=-1)
-        denominator = term_pos_in_den + term_neg_in_den
+        if SUPCONBASE == True:
+            denominator = torch.sum(exp_sim * self_mask.float(), dim=-1)  # [B]
+        if FULLMODE == True:
+            term_pos_in_den = torch.sum(exp_sim * pos_candidate_mask.float(), dim=-1)
+            term_neg_in_den = torch.sum(exp_sim * w_ov * neg_candidate_mask.float(), dim=-1)
+            denominator = term_pos_in_den + term_neg_in_den
 
         # InfoNCE per‑sample loss
         per_sample_loss = -torch.log((numerator + eps) / (denominator + eps))
