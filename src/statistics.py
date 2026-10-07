@@ -10,9 +10,9 @@ api = wandb.Api()
 WANDB_ENTITY = "mjjackey-university-of-southampton"
 WANDB_PROJECT = "goemotion_softinfonce"
 GROUPS = [
-    "ov_neg_denominator_b4_16",
-    "ov_whole_deno_b4_16",
-    "soft"
+    "ov_neg_deno_b64",
+    "supCon64"
+    # "soft"
 ]
 # metrics
 METRICS = ["test_acc", "test_weighted_f1", "test_macro_f1"]
@@ -99,7 +99,7 @@ def calc_mean_std(arr):
 
 if __name__ == "__main__":
     calc_metrics()
-    calc_sign()
+    # calc_sign()
     # df = pd.DataFrame(results, columns=["Method", "Acc", "Weighted-F1", "Macro-F1"])
     # print("\n==== Final Result Table ====")
     # print(df.to_markdown(index=False))

@@ -13,7 +13,6 @@ from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
 # import wandb
 import datetime
 
-
 class EarlyStopping:
     def __init__(self, args, patience=2, delta=0, type='acc', path='../output'):
         """

@@ -1,6 +1,7 @@
 import argparse
 import gc
 import sys, os
+from turtle import mode
 import torch
 import random
 import numpy as np
@@ -16,6 +17,7 @@ from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
 import wandb
 import datetime
 from datasets import *
+import models
 from models import CrossEncoder
 from utils import EarlyStopping
 # import plotly.express as px
@@ -38,7 +40,7 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch, global
                                                             labels.to(args.device), soft_p_tensor.to(args.device), 
 
         ## Invoke forward() function,   enabled=False
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16): 
+        with torch.autocast(device_type="cuda", dtype=torch.float16): 
             # logits' shape: [batch_size, num_class]
             lbl_pred_logits, cls_loss, contra_loss, loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, \
                                                                  soft_p_tensor=soft_p_tensor,  lbl_set_list=lbl_set_list, current_epoch=current_epoch)
@@ -122,7 +124,7 @@ def eval_or_test(model, loader, mode):
 
 FROM_PRE_TRAINED = False
 FROM_PRE_TRAINED_WHOLE = False
-GRADIENT_CHECK= True
+GRADIENT_CHECK= False
 def main():
     _, idx2label = get_dicts(args.dataset)
     num_classes = len(idx2label.items())
@@ -130,7 +132,11 @@ def main():
     class_names = [v for k, v in sorted(idx2label.items(), key=lambda item: item[0])]
 
     # _tau_ov{args.temperature_ov}
-    ckpt_name = f"best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_tau_ov{args.tau_ov}.pt" 
+    if models.FULLMODE == True:
+        prefix = "full"
+    elif models.SUPCONBASE == True:
+        prefix = "sup"
+    ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_tau_ov{args.tau_ov}.pt" 
     ckpt_path = os.path.join(args.save_dir, ckpt_name)
     if FROM_PRE_TRAINED_WHOLE:
         if not os.path.exists(ckpt_path):
@@ -213,23 +219,7 @@ def main():
         scheduler.load_state_dict(state_dict["scheduler_state_dict"])
         start_epochs = state_dict["epoch"] + 1
         global_step = state_dict["global_step"]
-    # ========== WandB init ==========
-    # run = wandb.init(
-    #     project="goemotion_soft_infonce",
-    #     name=f"lambda_{args.lambda_contrast}_tau_{args.temperature}_seed_{args.seed}",
-    #     config={
-    #         # "seed": args.seed,
-    #         "batch_size": args.batch_size,
-    #         "accum_iter": args.accum_iter,
-    #         "effective_batch": args.batch_size * args.accum_iter,
-    #         # "lambda_contrast": args.lambda_contrast,
-    #         # "temperature": args.temperature,
-    #         "lr": args.lr,
-    #         "model_type": args.encoder_type,
-    #         "dataset": "goemotions_single_27"
-    #     },
-    #     reinit=True
-    # )
+ 
     try: 
         for epoch in range(start_epochs,args.epochs):
             print(f'----------- {epoch + 1} -------------')
@@ -259,17 +249,17 @@ def main():
         # model.load_state_dict(ckpt_path, map_location=args.device)
         state_dict = torch.load(ckpt_path, map_location=args.device)
         model.load_state_dict(state_dict,strict=False)
-        test_loss, test_acc, test_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test')
-        print('test_acc: ', {test_acc}, 'test_f1: ', {test_f1}, 'test_macro_f1: ', {test_macro_f1})
+        test_loss, test_acc, test_weighted_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test')
+        print('test_acc: ', {test_acc}, 'test_weighted_f1: ', {test_weighted_f1}, 'test_macro_f1: ', {test_macro_f1})
         wandb.log({
             'test_loss': test_loss,
             'test_acc': test_acc,
-            'test_f1': test_f1,
+            'test_weighted_f1': test_weighted_f1,
             'test_macro_f1': test_macro_f1,
         },global_step)
 
         wandb.summary["test_acc"] = test_acc
-        wandb.summary["test_weighted_f1"] = test_f1
+        wandb.summary["test_weighted_f1"] = test_weighted_f1
         wandb.summary["test_macro_f1"] = test_macro_f1
         wandb.summary["best_val_macro_f1"] = best_val_macro
     
@@ -312,10 +302,11 @@ def wandb_init(args):
         setattr(args, k, v)
 
 if __name__ == '__main__':
+    os.environ["WANDB_MODE"] = "offline"
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='goemotions')
-    parser.add_argument('--batch_size', type=int, default=4)  # original: 64
-    parser.add_argument('--accum_iter', type=int, default=16)
+    parser.add_argument('--batch_size', type=int, default=64)  # original: 64
+    parser.add_argument('--accum_iter', type=int, default=1)
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--encoder_type', type=str, default='roberta-base')
     parser.add_argument('--seed', type=int, default=0)

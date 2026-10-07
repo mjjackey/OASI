@@ -229,3 +229,4 @@ __marimo__/
 output/
 .pt
 src/wandb
+cloud_platform/
