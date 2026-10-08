@@ -10,7 +10,8 @@ api = wandb.Api()
 WANDB_ENTITY = "mjjackey-university-of-southampton"
 WANDB_PROJECT = "goemotion_softinfonce"
 GROUPS = [
-    "ov_neg_deno_b64",
+    "improve_ov_b64",
+    "new_ov_b64",
     "supCon64"
     # "soft"
 ]
