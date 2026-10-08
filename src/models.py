@@ -35,6 +35,10 @@ class CrossEncoder(nn.Module):
         # self.base_temperature = args.base_temperature
         self.tau_ov= args.tau_ov
         self.alpha_ov = args.alpha_ov
+        self.k_n = args.k_n
+        self.k_p = args.k_p
+        self.t_n = args.t_n
+        self.t_p = args.t_p
 
         label_description = ED_description if args.dataset == 'ED' else GE_description
         max_seq_len = 128 if args.dataset == 'goemotions' else 64
@@ -127,9 +131,11 @@ class CrossEncoder(nn.Module):
             if current_epoch < self.warmup_epochs:
                 contra_loss = torch.tensor(0.0, device= self.args.device)
             else:
-                contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature,self.tau_ov,self.alpha_ov)
+                contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, \
+                                                    self.temperature,self.tau_ov,self.alpha_ov,self.k_n,self.t_n,self.k_p,self.t_p)
         else:
-            contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, self.temperature,self.tau_ov,self.alpha_ov)
+             contra_loss = self.soft_info_nce_loss(features_norm, soft_p_tensor, labels, lbl_set_list, \
+                                                 self.temperature,self.tau_ov,self.alpha_ov,self.k_n,self.t_n,self.k_p,self.t_p)
         # if __debug__:
         #     print(f"cls_loss: {cls_loss.item()}, contrastive loss: {contra_loss.item()}")
         total_loss = cls_loss + self.lambda_contrast * contra_loss
@@ -144,20 +150,29 @@ class CrossEncoder(nn.Module):
         tau: float = 0.07,
         tau_ov: float = 0.3,
         alpha_ov: float = 5.0,
+        k_n: float = 8.0,
+        t_n: float = 0.3,
+        k_p: float = 8.0,
+        t_p: float = 0.7,
         eps: float = 1e-8
     ) -> torch.Tensor:
         """
         Soft‑InfoNCE with overlap‑aware filtering (single‑label setting)
         overlap‑aware: only same‑label samples are positive candidates; different‑label are negatives.
         Positive pair weight w_ij = cos(soft_p[i], soft_p[j]) from annotator distribution.
-
+        Positive pair weight w_ij: sigmoid gated based on cos similarity of annotator soft_p distribution.
+        Negative pair weight w_ik: sigmoid gated based on Jaccard overlap of raw label sets.
         Args:
             features_norm: torch.Tensor, shape [B, D], L2‑normalized projection head
             soft_p: torch.Tensor, shape [B, num_classes], annotator distribution
             lbl_set_list: list of label set S_i for each sample in batch
             labels: torch.Tensor, shape [B], ground‑truth label index (long)
-            tau_o: jaccard overlap threshold
-            alpha: decay factor for overlap penalty
+            tau_ov: jaccard overlap threshold (reserved, original ablation)
+            alpha_ov: decay factor for overlap penalty (reserved, original ablation)
+            k_n: steepness of sigmoid for negative overlap weight
+            t_n: threshold of sigmoid for negative Jaccard overlap
+            k_p: steepness of sigmoid for positive annotator agreement weight
+            t_p: threshold of sigmoid for positive soft_p cos similarity
             eps: avoid division by zero
 
         Returns:
@@ -167,18 +182,19 @@ class CrossEncoder(nn.Module):
         assert labels.dim() == 1, f"labels expected shape [B], got {labels.shape}"
         B = features_norm.size(0)
         assert labels.size(0) == B, "batch size mismatch"
+        num_cls = soft_p.size(-1)
 
         # 1. compute similarity between text embeddings: z_i · z_j  (since normalized)
         sim_z = torch.matmul(features_norm, features_norm.T)  # [B, B]
 
         # 2. weight matrix w_ij: cosine similarity of annotator distribution p_i, p_j
-        w_annotator = F.cosine_similarity(
+        s_pos = F.cosine_similarity(
             soft_p.unsqueeze(1),   # [B,1,27]
             soft_p.unsqueeze(0),   # [1,B,27]
             dim=-1
         )  # [B,B]
 
-        # Precompute Jaccard overlap o_ij [B,B]
+        # 3. Precompute Jaccard overlap o_ij [B,B]
         jac_ov_sim = torch.zeros((B,B), dtype=torch.float32, device=features_norm.device)
         for i in range(B):
             for j in range(B):
@@ -187,44 +203,70 @@ class CrossEncoder(nn.Module):
                 inter = len(si & sj)
                 union = len(si | sj)
                 jac_ov_sim[i,j] = inter / union if union > 0 else 0.0
+        
+        # ============= 3. Vectorized Jaccard overlap (REPLACE double for loop) =============
+        # Build binary matrix [B, num_cls]: one-hot for raw label set
+        binary_label_mat = torch.zeros((B, num_cls), dtype=torch.float32, device=features_norm.device)
+        for idx, label_set in enumerate(lbl_set_list):
+            binary_label_mat[idx, list(label_set)] = 1.0
+        # intersection: A & B
+        inter = torch.matmul(binary_label_mat, binary_label_mat.T)
+        # union: A + B - A & B
+        union = binary_label_mat.sum(dim=1, keepdim=True) + binary_label_mat.sum(dim=0, keepdim=True) - inter
+        jac_ov_sim = torch.where(union > 0, inter / union, torch.zeros_like(inter))
            
         # Overlap-aware soft weight w_ov
-        w_ov = torch.where(
-            jac_ov_sim <= tau_ov,
-            torch.ones_like(jac_ov_sim),
-            torch.exp(-alpha_ov * jac_ov_sim)
-        )
+        # w_ov = torch.where(
+        #     jac_ov_sim <= tau_ov,
+        #     torch.ones_like(jac_ov_sim),
+        #     torch.exp(-alpha_ov * jac_ov_sim)
+        # )
 
         # Total weight: annotator similarity * overlap penalty
         # w_total = w_annotator * w_ov
+
+        # -------- Negative weight w_ov: higher Jaccard overlap -> larger weight --------
+        sigmoid_neg = 1.0 / (1.0 + torch.exp(-k_n * (jac_ov_sim - t_n)))
+        w_ov = 1.0 + sigmoid_neg
+
+        # -------- Positive weight w_annotator: lower annotator agreement -> larger weight --------
+        sigmoid_pos = 1.0 / (1.0 + torch.exp(k_p * (s_pos - t_p)))
+        w_annotator = 1.0 + sigmoid_pos
 
         # 3. overlap‑aware mask: positive candidate mask (same label)
         pos_candidate_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float()  # [B,B] 
         # exclude self‑pair i == i
         self_mask = 1.0 - torch.eye(B, device = features_norm.device)
-        # for i in range(B):
-        #     for j in range(B):
-        #         # The raw label set of sample i is totaly equal to the label set of sample j
-        #         if i != j and lbl_set_list[i].issubset(lbl_set_list[j]) and lbl_set_list[j].issubset(lbl_set_list[i]):
-        #             pos_candidate_mask[i,j] = True
         pos_candidate_mask = pos_candidate_mask * self_mask
         neg_candidate_mask = (1.0-pos_candidate_mask) * self_mask
+
+        # ============= 4. Per-sample weight normalization =============
+        # Positive weight normalization
+        pos_w_sum = torch.sum(w_annotator * pos_candidate_mask, dim=1, keepdim=True)
+        pos_count = torch.sum(pos_candidate_mask, dim=1, keepdim=True)
+        pos_w_sum = torch.where(pos_w_sum > eps, pos_w_sum, torch.ones_like(pos_w_sum))
+        pos_count = torch.where(pos_count > eps, pos_count, torch.ones_like(pos_count))
+        w_annotator_norm = w_annotator * pos_count / pos_w_sum
+
+        # Negative weight normalization
+        neg_w_sum = torch.sum(w_ov * neg_candidate_mask, dim=1, keepdim=True)
+        neg_count = torch.sum(neg_candidate_mask, dim=1, keepdim=True)
+        neg_w_sum = torch.where(neg_w_sum > eps, neg_w_sum, torch.ones_like(neg_w_sum))
+        neg_count = torch.where(neg_count > eps, neg_count, torch.ones_like(neg_count))
+        w_ov_norm = w_ov * neg_count / neg_w_sum
 
         exp_sim = torch.exp(sim_z / tau)
 
         # numerator: sum over valid positive pairs: w_total * exp(sim_ij/tau)
         if SUPCONBASE == True:
             numerator = torch.sum(exp_sim  * pos_candidate_mask.float(), dim=-1)
-        if FULLMODE == True:
-            numerator = torch.sum(exp_sim * w_annotator * pos_candidate_mask.float(), dim=-1)  # [B]
-
-        # denominator: sum over all j≠i (all candidates, positive + negative)
-        if SUPCONBASE == True:
+             # denominator: sum over all j≠i (all candidates, positive + negative)
             denominator = torch.sum(exp_sim * self_mask.float(), dim=-1)  # [B]
         if FULLMODE == True:
-            term_pos_in_den = torch.sum(exp_sim * pos_candidate_mask.float(), dim=-1)
-            term_neg_in_den = torch.sum(exp_sim * w_ov * neg_candidate_mask.float(), dim=-1)
-            denominator = term_pos_in_den + term_neg_in_den
+            pos_total = torch.sum(exp_sim * w_annotator_norm * pos_candidate_mask.float(), dim=-1) # [B]
+            neg_total = torch.sum(exp_sim * w_ov_norm * neg_candidate_mask.float(), dim=-1)
+            numerator = pos_total
+            denominator = pos_total + neg_total
 
         # InfoNCE per‑sample loss
         per_sample_loss = -torch.log((numerator + eps) / (denominator + eps))

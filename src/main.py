@@ -136,7 +136,7 @@ def main():
         prefix = "full"
     elif models.SUPCONBASE == True:
         prefix = "sup"
-    ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_tau_ov{args.tau_ov}.pt" 
+    ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_t_n{args.t_n}_t_p{args.t_p}.pt" 
     ckpt_path = os.path.join(args.save_dir, ckpt_name)
     if FROM_PRE_TRAINED_WHOLE:
         if not os.path.exists(ckpt_path):
@@ -188,7 +188,7 @@ def main():
 
     ## Compute real update steps
     # len(train_loader): the number of batches per epoch, args.accum_iter: optimiser.step() is called every args.accum_iter batches
-    update_per_epoch =  (len(train_loader) // args.accum_iter) 
+    update_per_epoch =  len(train_loader) // args.accum_iter
     total_update_steps = update_per_epoch * args.epochs
     warmup_ratio = 0.06
     start_epochs = 0
@@ -285,6 +285,10 @@ def wandb_init(args):
                 "encode_type": args.encoder_type,
                 "device_id": args.device_id,
                 "save_dir": args.save_dir,
+                # "k_n": args.k_n,
+                # "t_n": args.t_n,
+                # "k_p": args.k_p,
+                # "t_p": args.t_p
                 # "start_epoch": args.start_epoch,
             }
     
@@ -301,8 +305,7 @@ def wandb_init(args):
     for k,v in cfg.items():
         setattr(args, k, v)
 
-if __name__ == '__main__':
-    os.environ["WANDB_MODE"] = "offline"
+def set_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='goemotions')
     parser.add_argument('--batch_size', type=int, default=64)  # original: 64
@@ -324,15 +327,25 @@ if __name__ == '__main__':
     parser.add_argument('--device_id', type=str, default="0")
     parser.add_argument('--save_dir', type=str, default='../output')
     # parser.add_argument("--start_epoch", type=int, default=4, help="resume starting epoch")
+    parser.add_argument("--k_n", type=float, default=8.0, help="sigmoid steepness for negative overlap weight")
+    parser.add_argument("--t_n", type=float, default=0.3, help="sigmoid threshold for negative Jaccard overlap")
+    parser.add_argument("--k_p", type=float, default=8.0, help="sigmoid steepness for positive annotator agreement weight")
+    parser.add_argument("--t_p", type=float, default=0.7, help="sigmoid threshold for positive soft_p cos similarity")
 
     args = parser.parse_args()
-    args.device = torch.device("cuda:" + args.device_id if torch.cuda.is_available() else "cpu")
+    args.device = torch.device("cuda:{args.device_id}" if torch.cuda.is_available() else "cpu")
+    return args
 
-    wandb_init(args) # Initialize wandb
-
+def set_seed(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
+
+if __name__ == '__main__':
+    os.environ["WANDB_MODE"] = "offline"
+    args = set_args()
+    wandb_init(args) # Initialize wandb
+    set_seed(args)
 
     main()
