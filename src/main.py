@@ -1,4 +1,5 @@
 import argparse
+from collections import Counter
 import gc
 import sys, os
 from turtle import mode
@@ -13,7 +14,7 @@ from transformers import AdamW, get_linear_schedule_with_warmup,RobertaForSequen
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from torch.nn import functional as F
-from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
+from sklearn.metrics import classification_report, f1_score, accuracy_score, confusion_matrix
 import wandb
 import datetime
 from datasets import *
@@ -22,7 +23,7 @@ from models import CrossEncoder
 from utils import EarlyStopping
 # import plotly.express as px
 from sklearn.manifold import TSNE
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler 
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -37,7 +38,7 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch, global
     ## Get labels from the dataloader
     for input_ids, attention_mask, labels, soft_p_tensor, lbl_set_list in tqdm(train_loader):
         input_ids, attention_mask, labels, soft_p_tensor = input_ids.to(args.device), attention_mask.to(args.device),\
-                                                            labels.to(args.device), soft_p_tensor.to(args.device), 
+                                                            labels.to(args.device), soft_p_tensor.to(args.device) 
 
         ## Invoke forward() function,   enabled=False
         with torch.autocast(device_type="cuda", dtype=torch.float16): 
@@ -93,7 +94,7 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch, global
     return train_avg_loss, train_acc, train_weighted_f1, macro_f1, global_step
 
 
-def eval_or_test(model, loader, mode):
+def eval_or_test(model, loader, mode, train_class_counts):
     model.eval()
 
     all_logits = []
@@ -106,9 +107,10 @@ def eval_or_test(model, loader, mode):
 
             batch_loss = loss.item()
             total_loss += batch_loss
-            all_preds.extend(torch.argmax(logits, dim=-1).tolist())
-            all_labels.extend(labels.tolist())
-            all_logits.extend(logits.tolist())
+            preds = torch.argmax(logits, dim=-1).detach().cpu().tolist()
+            all_preds.extend(preds)
+            all_labels.extend(labels.detach().cpu().tolist())
+            all_logits.extend(logits.detach().cpu().tolist())
 
     eval_avg_loss = total_loss / len(loader)
     acc = accuracy_score(all_labels, all_preds)
@@ -118,9 +120,59 @@ def eval_or_test(model, loader, mode):
                  f'acc : {acc:.04f}, '
                  f'weighted_f1 : {weighted_f1:.04f}, '
                  f'macro_f1 : {macro_f1:.04f}')
+    if mode == 'Test':
+        calc_per_class_f1(all_labels,all_preds, num_classes=27, train_class_counts=train_class_counts)
 
     return eval_avg_loss, acc, weighted_f1, macro_f1
 
+def calc_per_class_f1(all_labels, all_preds,num_classes,train_class_counts):
+    # ===================== 【2】计算逐类别F1 =====================
+    
+    per_class_f1 = f1_score(all_labels, all_preds, labels=list(range(num_classes)), average=None)
+
+    # Print per-class F1
+    print("\n===== Per-class F1 Score =====")
+    for cls_id in range(num_classes):
+        print(f"Class {cls_id:02d} | F1 = {per_class_f1[cls_id]:.4f}")
+
+    # Full classification report
+    print("\nClassification Report:")
+    print(classification_report(all_labels, all_preds, digits=4))
+
+    # ===================== 【3】长尾分组：Many / Medium / Few  =====================
+    # !!! Important: train_class_counts should be precomputed from TRAIN set
+    # Example: train_class_counts = [number of samples for class 0, class1, ..., class26]
+    train_class_counts = np.array(train_class_counts)
+
+    # Split by training set sample count (common rule: 3 quantiles)
+    quantiles = np.quantile(train_class_counts, [0.33, 0.66])
+    many_cls_idx = np.where(train_class_counts > quantiles[1])[0]
+    medium_cls_idx = np.where((train_class_counts >= quantiles[0]) & (train_class_counts <= quantiles[1]))[0]
+    few_cls_idx = np.where(train_class_counts < quantiles[0])[0]
+
+    many_f1_mean = np.mean(per_class_f1[many_cls_idx])
+    medium_f1_mean = np.mean(per_class_f1[medium_cls_idx])
+    few_f1_mean = np.mean(per_class_f1[few_cls_idx])
+
+    print(f"\n===== Long-tailed Group F1 =====")
+    print(f"Many-shot classes ({len(many_cls_idx)}): Avg F1 = {many_f1_mean:.4f}")
+    print(f"Medium-shot classes ({len(medium_cls_idx)}): Avg F1 = {medium_f1_mean:.4f}")
+    print(f"Few-shot classes ({len(few_cls_idx)}): Avg F1 = {few_f1_mean:.4f}")
+
+    group_avg_f1 = np.array([ many_f1_mean,  medium_f1_mean, few_f1_mean])
+
+    # 拼接成【单行】：27 + 3 = 30个元素
+    row_all = np.concatenate([per_class_f1, group_avg_f1])
+    np.save(f"{args.seed}_f1_one_row.npy", row_all)
+
+    # ===================== 【4】W&B log（你在用wandb，直接上报） =====================
+    wandb.log({
+        "eval/many_f1": many_f1_mean,
+        "eval/medium_f1": medium_f1_mean,
+        "eval/few_f1": few_f1_mean,
+    })
+
+    return many_f1_mean,medium_f1_mean,few_f1_mean
 
 FROM_PRE_TRAINED = False
 FROM_PRE_TRAINED_WHOLE = False
@@ -133,10 +185,11 @@ def main():
 
     # _tau_ov{args.temperature_ov}
     if models.FULLMODE == True:
-        prefix = "full"
+        prefix = "oasi_full"
     elif models.SUPCONBASE == True:
         prefix = "sup"
-    ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_t_n{args.t_n}_t_p{args.t_p}.pt" 
+    # ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_t_n{args.t_n}_t_p{args.t_p}.pt" 
+    ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}.pt" 
     ckpt_path = os.path.join(args.save_dir, ckpt_name)
     if FROM_PRE_TRAINED_WHOLE:
         if not os.path.exists(ckpt_path):
@@ -153,6 +206,10 @@ def main():
     valid_loader = DataLoader(validset, batch_size=args.batch_size, shuffle=False, collate_fn=trainset.collate)
     testset = emotion_DataSet('test', tkr, args.dataset)
     test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False, collate_fn=trainset.collate)
+    train_labels = [sample['label'] for sample in trainset]
+    train_class_counts = Counter(train_labels)
+    # sort to 0~26 order
+    train_class_counts = [train_class_counts[i] for i in range(num_classes)]
 
     ## Construct the model
     model = CrossEncoder(args, num_classes, tkr)
@@ -225,7 +282,7 @@ def main():
             print(f'----------- {epoch + 1} -------------')
 
             train_loss, train_acc, train_f1, train_macro_f1, global_step = train(model, train_loader, opt, scheduler, args.accum_iter, epoch,  global_step)
-            eval_loss, eval_acc, eval_f1, eval_macro_f1 = eval_or_test(model, valid_loader, 'Eval')
+            eval_loss, eval_acc, eval_f1, eval_macro_f1 = eval_or_test(model, valid_loader, 'Eval', train_class_counts)
             if eval_macro_f1 > best_val_macro:
                 best_val_macro = eval_macro_f1
             wandb.log({
@@ -249,7 +306,7 @@ def main():
         # model.load_state_dict(ckpt_path, map_location=args.device)
         state_dict = torch.load(ckpt_path, map_location=args.device)
         model.load_state_dict(state_dict,strict=False)
-        test_loss, test_acc, test_weighted_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test')
+        test_loss, test_acc, test_weighted_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test', train_class_counts)
         print('test_acc: ', {test_acc}, 'test_weighted_f1: ', {test_weighted_f1}, 'test_macro_f1: ', {test_macro_f1})
         wandb.log({
             'test_loss': test_loss,
@@ -305,14 +362,14 @@ def wandb_init(args):
     for k,v in cfg.items():
         setattr(args, k, v)
 
-def set_args():
+def set_args(seed:int=42):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='goemotions')
     parser.add_argument('--batch_size', type=int, default=64)  # original: 64
     parser.add_argument('--accum_iter', type=int, default=1)
     parser.add_argument('--epochs', type=int, default=8)
     parser.add_argument('--encoder_type', type=str, default='roberta-base')
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=seed)
     parser.add_argument('--lr', type=float, default=2e-05)
     parser.add_argument('--weight_decay', type=float, default=0.001) # original: 0.001
     parser.add_argument('--patience', type=int, default=4) # 2  # original: 4
@@ -333,7 +390,7 @@ def set_args():
     parser.add_argument("--t_p", type=float, default=0.7, help="sigmoid threshold for positive soft_p cos similarity")
 
     args = parser.parse_args()
-    args.device = torch.device("cuda:{args.device_id}" if torch.cuda.is_available() else "cpu")
+    args.device = torch.device("cuda:" + args.device_id if torch.cuda.is_available() else "cpu")
     return args
 
 def set_seed(args):
