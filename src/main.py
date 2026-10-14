@@ -20,10 +20,12 @@ import datetime
 from datasets import *
 import models
 from models import CrossEncoder
-from utils import EarlyStopping
+from utils import EarlyStopping, set_args,set_seed
 # import plotly.express as px
 from sklearn.manifold import TSNE
 from torch.cuda.amp import autocast, GradScaler 
+from rep_analysis import calc_per_class_f1,compute_classwise_avg_jaccard,get_1seed_overlap_f1
+from utils import wandb_para_search_strag,wandb_para_search_strag2
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -94,7 +96,7 @@ def train(model, train_loader, opt, scheduler, accum_iter, current_epoch, global
     return train_avg_loss, train_acc, train_weighted_f1, macro_f1, global_step
 
 
-def eval_or_test(model, loader, mode, train_class_counts):
+def eval_or_test(model, loader, mode, train_class_counts,train_dataset,epoch,global_step):
     model.eval()
 
     all_logits = []
@@ -120,59 +122,33 @@ def eval_or_test(model, loader, mode, train_class_counts):
                  f'acc : {acc:.04f}, '
                  f'weighted_f1 : {weighted_f1:.04f}, '
                  f'macro_f1 : {macro_f1:.04f}')
-    if mode == 'Test':
-        calc_per_class_f1(all_labels,all_preds, num_classes=27, train_class_counts=train_class_counts)
+    wandb.log({
+                f'{mode}_loss': eval_avg_loss,
+                f'{mode}_acc': acc,
+                f'{mode}_weighted_f1': weighted_f1,
+                f'{mode}_macro_f1': macro_f1,
+            },global_step)
 
+    filepath = f"../output/{args.method}_{args.seed}_{args.lambda_contrast}_{args.tau_ov}_{args.alpha_ov}_{mode}"
+    per_class_f1, many_f1, medium_f1, few_f1 = calc_per_class_f1(all_labels,all_preds,27, train_class_counts, filepath=filepath)
+    class_avg_jac = compute_classwise_avg_jaccard(train_dataset)
+    high_overlap_f1, _ = get_1seed_overlap_f1(per_class_f1,class_avg_jac)
+
+    if mode == 'Eval':
+        composite_score = wandb_para_search_strag2(high_overlap_f1, macro_f1, many_f1, medium_f1, few_f1)
+
+        # 上传到wandb，贝叶斯优化最大化这个 composite_score
+        wandb.log({
+            "epoch": epoch,
+            "composite_score": composite_score, # <-- 贝叶斯优化目标
+            "val_high_overlap_f1": high_overlap_f1,
+            "val_many_f1": many_f1,
+            "val_medium_f1": medium_f1,
+            "val_few_f1": few_f1,
+        })
+        
     return eval_avg_loss, acc, weighted_f1, macro_f1
 
-def calc_per_class_f1(all_labels, all_preds,num_classes,train_class_counts):
-    # ===================== 【2】计算逐类别F1 =====================
-    
-    per_class_f1 = f1_score(all_labels, all_preds, labels=list(range(num_classes)), average=None)
-
-    # Print per-class F1
-    print("\n===== Per-class F1 Score =====")
-    for cls_id in range(num_classes):
-        print(f"Class {cls_id:02d} | F1 = {per_class_f1[cls_id]:.4f}")
-
-    # Full classification report
-    print("\nClassification Report:")
-    print(classification_report(all_labels, all_preds, digits=4))
-
-    # ===================== 【3】长尾分组：Many / Medium / Few  =====================
-    # !!! Important: train_class_counts should be precomputed from TRAIN set
-    # Example: train_class_counts = [number of samples for class 0, class1, ..., class26]
-    train_class_counts = np.array(train_class_counts)
-
-    # Split by training set sample count (common rule: 3 quantiles)
-    quantiles = np.quantile(train_class_counts, [0.33, 0.66])
-    many_cls_idx = np.where(train_class_counts > quantiles[1])[0]
-    medium_cls_idx = np.where((train_class_counts >= quantiles[0]) & (train_class_counts <= quantiles[1]))[0]
-    few_cls_idx = np.where(train_class_counts < quantiles[0])[0]
-
-    many_f1_mean = np.mean(per_class_f1[many_cls_idx])
-    medium_f1_mean = np.mean(per_class_f1[medium_cls_idx])
-    few_f1_mean = np.mean(per_class_f1[few_cls_idx])
-
-    print(f"\n===== Long-tailed Group F1 =====")
-    print(f"Many-shot classes ({len(many_cls_idx)}): Avg F1 = {many_f1_mean:.4f}")
-    print(f"Medium-shot classes ({len(medium_cls_idx)}): Avg F1 = {medium_f1_mean:.4f}")
-    print(f"Few-shot classes ({len(few_cls_idx)}): Avg F1 = {few_f1_mean:.4f}")
-
-    group_avg_f1 = np.array([ many_f1_mean,  medium_f1_mean, few_f1_mean])
-
-    # 拼接成【单行】：27 + 3 = 30个元素
-    row_all = np.concatenate([per_class_f1, group_avg_f1])
-    np.save(f"{args.seed}_f1_one_row.npy", row_all)
-
-    # ===================== 【4】W&B log（你在用wandb，直接上报） =====================
-    wandb.log({
-        "eval/many_f1": many_f1_mean,
-        "eval/medium_f1": medium_f1_mean,
-        "eval/few_f1": few_f1_mean,
-    })
-
-    return many_f1_mean,medium_f1_mean,few_f1_mean
 
 FROM_PRE_TRAINED = False
 FROM_PRE_TRAINED_WHOLE = False
@@ -184,12 +160,12 @@ def main():
     class_names = [v for k, v in sorted(idx2label.items(), key=lambda item: item[0])]
 
     # _tau_ov{args.temperature_ov}
-    if models.FULLMODE == True:
-        prefix = "oasi_full"
-    elif models.SUPCONBASE == True:
-        prefix = "sup"
+    # if models.FULLMODE == True:
+    #     prefix = "oasi_full"
+    # elif models.SUPCONBASE == True:
+    #     prefix = "sup"
     # ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_t_n{args.t_n}_t_p{args.t_p}.pt" 
-    ckpt_name = f"{prefix}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}.pt" 
+    ckpt_name = f"{args.method}_best_seed{args.seed}_lc{args.lambda_contrast}_tau{args.temperature}_tau_ov{args.tau_ov}_alpha_ov{args.alpha_ov}.pt" 
     ckpt_path = os.path.join(args.save_dir, ckpt_name)
     if FROM_PRE_TRAINED_WHOLE:
         if not os.path.exists(ckpt_path):
@@ -206,7 +182,7 @@ def main():
     valid_loader = DataLoader(validset, batch_size=args.batch_size, shuffle=False, collate_fn=trainset.collate)
     testset = emotion_DataSet('test', tkr, args.dataset)
     test_loader = DataLoader(testset, batch_size=args.batch_size, shuffle=False, collate_fn=trainset.collate)
-    train_labels = [sample['label'] for sample in trainset]
+    train_labels = [sample[1] for sample in trainset]
     train_class_counts = Counter(train_labels)
     # sort to 0~26 order
     train_class_counts = [train_class_counts[i] for i in range(num_classes)]
@@ -281,20 +257,22 @@ def main():
         for epoch in range(start_epochs,args.epochs):
             print(f'----------- {epoch + 1} -------------')
 
-            train_loss, train_acc, train_f1, train_macro_f1, global_step = train(model, train_loader, opt, scheduler, args.accum_iter, epoch,  global_step)
-            eval_loss, eval_acc, eval_f1, eval_macro_f1 = eval_or_test(model, valid_loader, 'Eval', train_class_counts)
+            train_loss, train_acc, train_f1, train_macro_f1, global_step = train(model, train_loader, opt, scheduler, args.accum_iter, epoch, global_step)
+            wandb.log({
+                            'train_loss': train_loss,
+                            'train_acc': train_acc,
+                            'train_f1': train_f1,
+                            'train_macro_f1': train_macro_f1,
+                            # 'eval_loss': eval_loss,
+                            # 'eval_acc': eval_acc,
+                            # 'eval_f1': eval_f1,
+                            # 'eval_macro_f1': eval_macro_f1
+                        },step=global_step)
+            eval_loss, eval_acc, eval_f1, eval_macro_f1 = eval_or_test(model, valid_loader, 'Eval', \
+                                                                    train_class_counts,trainset,epoch,global_step)
+
             if eval_macro_f1 > best_val_macro:
                 best_val_macro = eval_macro_f1
-            wandb.log({
-                'train_loss': train_loss,
-                'train_acc': train_acc,
-                'train_f1': train_f1,
-                'train_macro_f1': train_macro_f1,
-                'eval_loss': eval_loss,
-                'eval_acc': eval_acc,
-                'eval_f1': eval_f1,
-                'eval_macro_f1': eval_macro_f1
-            },step=global_step)
 
             early_stopping(val_loss=eval_loss, val_metric=eval_macro_f1, model=model, \
                             optimiser=opt,scheduler=scheduler,epoch=epoch,global_step=global_step)
@@ -306,14 +284,15 @@ def main():
         # model.load_state_dict(ckpt_path, map_location=args.device)
         state_dict = torch.load(ckpt_path, map_location=args.device)
         model.load_state_dict(state_dict,strict=False)
-        test_loss, test_acc, test_weighted_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test', train_class_counts)
-        print('test_acc: ', {test_acc}, 'test_weighted_f1: ', {test_weighted_f1}, 'test_macro_f1: ', {test_macro_f1})
-        wandb.log({
-            'test_loss': test_loss,
-            'test_acc': test_acc,
-            'test_weighted_f1': test_weighted_f1,
-            'test_macro_f1': test_macro_f1,
-        },global_step)
+        test_loss, test_acc, test_weighted_f1, test_macro_f1 = eval_or_test(model, test_loader, 'Test', \
+                                                                train_class_counts, trainset, epoch, global_step)
+        # print('test_acc: ', {test_acc}, 'test_weighted_f1: ', {test_weighted_f1}, 'test_macro_f1: ', {test_macro_f1})
+        # wandb.log({
+        #     'test_loss': test_loss,
+        #     'test_acc': test_acc,
+        #     'test_weighted_f1': test_weighted_f1,
+        #     'test_macro_f1': test_macro_f1,
+        # },global_step)
 
         wandb.summary["test_acc"] = test_acc
         wandb.summary["test_weighted_f1"] = test_weighted_f1
@@ -342,6 +321,7 @@ def wandb_init(args):
                 "encode_type": args.encoder_type,
                 "device_id": args.device_id,
                 "save_dir": args.save_dir,
+                "method": args.method,
                 # "k_n": args.k_n,
                 # "t_n": args.t_n,
                 # "k_p": args.k_p,
@@ -361,43 +341,6 @@ def wandb_init(args):
     cfg = wandb.config
     for k,v in cfg.items():
         setattr(args, k, v)
-
-def set_args(seed:int=42):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='goemotions')
-    parser.add_argument('--batch_size', type=int, default=64)  # original: 64
-    parser.add_argument('--accum_iter', type=int, default=1)
-    parser.add_argument('--epochs', type=int, default=8)
-    parser.add_argument('--encoder_type', type=str, default='roberta-base')
-    parser.add_argument('--seed', type=int, default=seed)
-    parser.add_argument('--lr', type=float, default=2e-05)
-    parser.add_argument('--weight_decay', type=float, default=0.001) # original: 0.001
-    parser.add_argument('--patience', type=int, default=4) # 2  # original: 4
-    # parser.add_argument('--alpha', type=float, default=0.05) #0.05, 0.1, 0.2 original: 0.4
-    parser.add_argument('--warmup_epochs', type=int, default=0)
-    # parser.add_argument('--temperature', type=float, default=0.2) #0.15,0.2,0.3 original: 0.5
-    # parser.add_argument('--base_temperature', type=float, default=0.07)
-    parser.add_argument('--temperature', type=float, default=0.07) # 0.05~0.1
-    parser.add_argument('--lambda_contrast', type=float, default=0.1) # 0.1~1.0
-    parser.add_argument('--tau_ov', type=float, default=0.3)
-    parser.add_argument('--alpha_ov', type=float, default=5.0)
-    parser.add_argument('--device_id', type=str, default="0")
-    parser.add_argument('--save_dir', type=str, default='../output')
-    # parser.add_argument("--start_epoch", type=int, default=4, help="resume starting epoch")
-    parser.add_argument("--k_n", type=float, default=8.0, help="sigmoid steepness for negative overlap weight")
-    parser.add_argument("--t_n", type=float, default=0.3, help="sigmoid threshold for negative Jaccard overlap")
-    parser.add_argument("--k_p", type=float, default=8.0, help="sigmoid steepness for positive annotator agreement weight")
-    parser.add_argument("--t_p", type=float, default=0.7, help="sigmoid threshold for positive soft_p cos similarity")
-
-    args = parser.parse_args()
-    args.device = torch.device("cuda:" + args.device_id if torch.cuda.is_available() else "cpu")
-    return args
-
-def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
 
 if __name__ == '__main__':
     os.environ["WANDB_MODE"] = "offline"

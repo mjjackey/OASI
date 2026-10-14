@@ -99,9 +99,71 @@ def calc_mean_std(arr):
     std = np.std(arr, ddof=1) # sample std n-1 (use for paper!)
     return mean, std
 
+def get_wandb_bayes():
+    api = wandb.Api()
+
+    project = "OvSoftInfoNCE-src"
+    sweep_id = "nx4p1pn9"
+    # sweep_id = "wqqz39ya"
+
+    sweep = api.sweep(f"{WANDB_ENTITY}/{project}/{sweep_id}")
+    runs = sweep.runs
+
+    rows = []
+    for run in runs:
+        # if run.state != "finished":
+        #     continue
+        rows.append({
+            "state": getattr(run, "state", None),
+            "lambda_contrast": run.config["lambda_contrast"],
+            "tau_ov": run.config["tau_ov"],
+            "alpha_ov": run.config["alpha_ov"],
+            "composite_score": run.summary.get("composite_score"),
+            "high_overlap_f1": run.summary.get("val_high_overlap_f1"),
+            "macro_f1": run.summary.get("Eval_macro_f1"),
+            "many_f1": run.summary.get("val_many_f1"),
+            "medium_f1": run.summary.get("val_medium_f1"),
+            "few_f1": run.summary.get("val_few_f1"),
+        })
+
+    df = pd.DataFrame(rows)
+    print(df["state"].value_counts(dropna=False)) # 统计每种状态数量
+    df_sorted = df.sort_values("composite_score", ascending=False,na_position="last")
+
+    print("==== Top10 candidates ====")
+    print(df_sorted.head(10))
+
+    df_sorted.to_csv("../output/sweep_all_runs.csv", index=False)
+
+    # get built-in best run
+    best_run = sweep.best_run()
+    print("\n==== Best run (W&B built-in) ====")
+    print(f"lambda={best_run.config['lambda_contrast']}, tau_ov={best_run.config['tau_ov']}, alpha={best_run.config['alpha_ov']}")
+    print(f"composite_score: {best_run.summary['composite_score']}")
+    print(f"HighOverlap F1: {best_run.summary['val_high_overlap_f1']}")
+
+def check_sweep_bayes():
+    project = "OvSoftInfoNCE-src"
+    sweep_id = "wqqz39ya"
+    api = wandb.Api()
+    sweep = api.sweep(f"{WANDB_ENTITY}/{project}/{sweep_id}")
+    # 获取所有唯一参数组合
+    param_set = set()
+    for r in sweep.runs:
+        cfg = r.config
+        key = (cfg["lambda_contrast"], cfg["tau_ov"], cfg["alpha_ov"])
+        if all(k is not None for k in key):
+            param_set.add(key)
+    print(f"Unique hyperparameter candidates count: {len(param_set)}")
+    for p in sorted(param_set):
+        print(p)
+
+
 if __name__ == "__main__":
-    calc_metrics()
+    # calc_metrics()
     # calc_sign()
     # df = pd.DataFrame(results, columns=["Method", "Acc", "Weighted-F1", "Macro-F1"])
     # print("\n==== Final Result Table ====")
     # print(df.to_markdown(index=False))
+    get_wandb_bayes()
+    # check_sweep_bayes()

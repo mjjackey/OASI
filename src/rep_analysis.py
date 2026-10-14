@@ -10,10 +10,13 @@ from sklearn.metrics import f1_score, classification_report
 from torch.utils.data import DataLoader
 from datasets import get_dicts, emotion_DataSet
 from models import CrossEncoder
-from main import set_args,set_seed
+from utils import set_args,set_seed
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib import rc
 import umap
+# import wandb
+
 
 target_confuse_labels = {"admiration", "approval", "sadness", "disappointment", "fear", "nervousness"}
     
@@ -50,19 +53,19 @@ def get_preds_labels(model,val_dataloader,device):
 
     return all_labels,all_preds
 
-def calc_per_class_f1(all_labels, all_preds,num_classes,train_class_counts):
+def calc_per_class_f1(all_labels, all_preds,num_classes,train_class_counts,filepath='per_class_f1'):
     # ===================== 【2】计算逐类别F1 =====================
     
     per_class_f1 = f1_score(all_labels, all_preds, labels=list(range(num_classes)), average=None)
 
     # Print per-class F1
-    print("\n===== Per-class F1 Score =====")
-    for cls_id in range(num_classes):
-        print(f"Class {cls_id:02d} | F1 = {per_class_f1[cls_id]:.4f}")
+    # print("\n===== Per-class F1 Score =====")
+    # for cls_id in range(num_classes):
+    #     print(f"Class {cls_id:02d} | F1 = {per_class_f1[cls_id]:.4f}")
 
     # Full classification report
-    print("\nClassification Report:")
-    print(classification_report(all_labels, all_preds, digits=4))
+    # print("\nClassification Report:")
+    # print(classification_report(all_labels, all_preds, digits=4))
 
     # ===================== 【3】长尾分组：Many / Medium / Few  =====================
     # !!! Important: train_class_counts should be precomputed from TRAIN set
@@ -84,6 +87,20 @@ def calc_per_class_f1(all_labels, all_preds,num_classes,train_class_counts):
     print(f"Medium-shot classes ({len(medium_cls_idx)}): Avg F1 = {medium_f1_mean:.4f}")
     print(f"Few-shot classes ({len(few_cls_idx)}): Avg F1 = {few_f1_mean:.4f}")
 
+    if 'Test' in filepath:
+        group_avg_f1 = np.array([ many_f1_mean,  medium_f1_mean, few_f1_mean])
+        # concatenate to one row：27 + 3 = 30 elements
+        row_all = np.concatenate([per_class_f1, group_avg_f1])
+        np.save(f"{filepath}_f1_one_row.npy", row_all)
+
+    # ===================== 【4】W&B log（你在用wandb，直接上报） =====================
+    # if wandb != None:
+    #     wandb.log({
+    #         "eval/many_f1": many_f1_mean,
+    #         "eval/medium_f1": medium_f1_mean,
+    #         "eval/few_f1": few_f1_mean,
+    #     })
+    
     return per_class_f1, many_f1_mean,medium_f1_mean,few_f1_mean
 
 
@@ -250,17 +267,17 @@ def get_classwise_avg_jaccard():
     return class_avg_jaccard
 
 
-def get_1seed_overlap_f1():
+def get_1seed_overlap_f1(per_class_f1,class_avg_jaccard):
     # per-class F1 in order class0 ~ class26
-    per_class_f1 = np.array([
-    0.7790, 0.8802, 0.5387, 0.4057, 0.5932, 0.5868, 0.5165,
-    0.7292, 0.6471, 0.4076, 0.5656, 0.5860, 0.6512, 0.4839,
-    0.7704, 0.9159, 0.0000, 0.6462, 0.8284, 0.6923, 0.6432,
-    0.3636, 0.3308, 0.6667, 0.6327, 0.6571, 0.5829
-    ])
+    # per_class_f1 = np.array([
+    # 0.7790, 0.8802, 0.5387, 0.4057, 0.5932, 0.5868, 0.5165,
+    # 0.7292, 0.6471, 0.4076, 0.5656, 0.5860, 0.6512, 0.4839,
+    # 0.7704, 0.9159, 0.0000, 0.6462, 0.8284, 0.6923, 0.6432,
+    # 0.3636, 0.3308, 0.6667, 0.6327, 0.6571, 0.5829
+    # ])
 
     # ========== load class_avg_jaccard ==========
-    class_avg_jaccard = np.load("../output/class_avg_jaccard.npy")
+    # class_avg_jaccard = np.load("../output/class_avg_jaccard.npy")
     jac_med = np.median(class_avg_jaccard)
     high_mask = class_avg_jaccard >= jac_med
     low_mask = class_avg_jaccard < jac_med
@@ -270,6 +287,8 @@ def get_1seed_overlap_f1():
 
     print(f"High-overlap classes Avg F1: {high_overlap_f1_mean:.4f}")
     print(f"Low-overlap classes Avg F1: {low_overlap_f1_mean:.4f}")
+
+    return high_overlap_f1_mean,low_overlap_f1_mean
 
 
 def get_1seed_cross_tailed_jac_f1():
@@ -455,7 +474,7 @@ def get_seed_avg_tailed_jac_f1():
         ## read .pt file
         # per_class_f1, many_f1,medium_f1,few_f1 = get_per_class_f1(method_name,seed)
         ## read f1 storage npy file
-        f1_loaded = np.load(f"../output/{seed}_f1_one_row.npy")
+        f1_loaded = np.load(f"../output/{method_name}_{seed}_f1_one_row.npy")
         per_class_f1 = f1_loaded[:27]
         group_avg_load = f1_loaded[27:]
         many_f1, medium_f1, few_f1 = group_avg_load
@@ -490,7 +509,7 @@ def get_seed_avg_tailed_jac_f1():
         print(f"\nSaved all per-seed results to {out_csv}")
 
     # ====================== Compute Mean & Std across 5 seeds ======================
-    import pandas as pd
+    
     df = pd.read_csv(out_csv)
     summary = df.groupby("method").agg(
         many_f1_mean=("many_f1", "mean"),
@@ -510,11 +529,10 @@ def get_seed_avg_tailed_jac_f1():
     summary.to_csv(f"./group_f1_summary.csv", index=False)
     print("Summary saved to group_f1_summary.csv")
 
-
 if __name__ == '__main__':
     # plot_umap()
     # get_classwise_avg_jaccard()
     # get_1seed_overlap_f1()
-    get_1seed_cross_tailed_jac_f1()
+    # get_1seed_cross_tailed_jac_f1()
     # save_oasi_f1()
-    # get_seed_avg_tailed_jac_f1()
+    get_seed_avg_tailed_jac_f1()

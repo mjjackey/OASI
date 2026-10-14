@@ -1,0 +1,22 @@
+program: main.py
+method: bayes
+metric:
+  name: composite_score
+  goal: maximize
+parameters:
+  lambda_contrast:
+    distribution: categorical
+    values: [0.01,0.05,0.1,0.2,0.5]
+  tau_ov:
+    distribution: categorical
+    values: [0.3,0.4,0.5,0.6,0.7]
+  alpha_ov:
+    distribution: categorical
+    values: [2.0,3.0,5.0,7.0,10.0]
+# run_cap: 30
+max_run_count: 30
+# Early termination 
+early_terminate:
+  type: hyperband
+  min_iter: 4          # run at least 4 epochs, then evaluate early stopping
+  eta: 3               # keep top 1/eta candadidates each run
